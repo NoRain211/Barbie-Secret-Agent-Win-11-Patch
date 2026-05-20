@@ -1,0 +1,150 @@
+# Secret Agent Barbie — Windows 11 Compatibility Fix
+
+A reverse-engineered compatibility solution that makes **Secret Agent Barbie** (2001, Gigawatt Studios / Vivendi Universal) run natively on Windows 11 — no VMs, no dosbox, just a clean game directory.
+
+## Quick Start
+
+1. Copy the game files from the CD/ISO into a folder (e.g. `game-files/`)
+2. Copy these files into the game folder alongside `SecretAgent.exe`:
+   - `shim-dll/build/ddraw.dll` — our compatibility proxy
+   - `dgVoodoo_ddraw.dll` — dgVoodoo2 DDraw wrapper (from [dgVoodoo2 v2.86.5](https://github.com/dege-diosg/dgVoodoo2/releases))
+   - `D3DImm.dll` — dgVoodoo2 Direct3D wrapper
+3. Run `SecretAgent.exe`
+
+No admin rights required. No registry changes needed. No installer.
+
+## What It Does
+
+The game was built for Windows 95/98 using DirectX 7 (DirectDraw + Direct3D 7). It fails on modern Windows for several reasons:
+
+| Problem | Symptom | Our Fix |
+|---------|---------|---------|
+| Missing registry keys | Instant crash (access violation) | IAT hook returns hardcoded defaults |
+| CD-ROM drive check | "Please insert CD-ROM" error | Fake `GetDriveTypeA` / `GetVolumeInformationA` |
+| DDraw exclusive mode + DWM | Black screen | `SetAppCompatData(12, 0)` disables DWM maximized windowed mode |
+| 16bpp display modes | "Not implemented" error | Coerce 16bpp requests to 32bpp |
+| D3D7 surface memory flags | CreateSurface fails | Strip SYSTEMMEMORY from primary, force on Z-buffer (non-dgVoodoo path) |
+| DDraw/D3D7 rendering | Black screen, pixel format issues | Chain through dgVoodoo2 for DDraw/D3D7 to D3D11 translation |
+
+## Architecture
+
+```
+SecretAgent.exe
+    |
+    +-- loads "ddraw.dll" (our proxy, from game directory)
+    |   |
+    |   +-- IAT hooks: RegOpenKeyExA, RegQueryValueExA, RegCloseKey
+    |   |   (returns hardcoded registry values for game config)
+    |   |
+    |   +-- IAT hooks: GetDriveTypeA, GetVolumeInformationA
+    |   |   (bypasses CD-ROM check)
+    |   |
+    |   +-- Loads "dgVoodoo_ddraw.dll" (dgVoodoo2, renamed)
+    |   |   (DDraw/D3D7 -> D3D11 rendering translation)
+    |   |
+    |   +-- Wraps IDirectDraw7 in proxy COM object
+    |       (intercepts SetCooperativeLevel, SetDisplayMode, CreateSurface)
+    |
+    +-- D3DImm.dll (dgVoodoo2 Direct3D immediate mode)
+```
+
+## Verified Working
+
+- Main menu and all UI
+- Cutscenes (Cinepak codec, natively supported)
+- Audio (voices, music, sound effects)
+- Keyboard and mouse controls
+- Alt+Tab recovery
+- New York mission (completed)
+- Tokyo mission (loaded and playable)
+- No admin rights required
+
+## Building the Proxy DLL
+
+Requires TDM-GCC or MinGW with 32-bit support:
+
+```bash
+cd shim-dll
+gcc -m32 -shared -DINITGUID \
+    -o build/ddraw.dll \
+    src/main.c src/ddraw_proxy.c \
+    -Iinclude -lole32 -luuid \
+    -Wall -Wextra ddraw.def \
+    -Wl,--enable-stdcall-fixup
+```
+
+## Project Structure
+
+```
+barbie-secret-agent-re/
++-- game-files/           # Game data (from CD/ISO)
+|   +-- SecretAgent.exe   # Original game executable
+|   +-- ddraw.dll         # Our proxy (built from shim-dll/)
+|   +-- dgVoodoo_ddraw.dll  # dgVoodoo2 DDraw wrapper
+|   +-- D3DImm.dll        # dgVoodoo2 D3D wrapper
+|   +-- Pak/              # Game data archives
+|   +-- Video/            # Cutscene AVIs (Cinepak)
+|   +-- Saves/            # Save data
++-- shim-dll/
+|   +-- src/
+|   |   +-- main.c        # DllMain, export forwarders, registry + CD-ROM hooks
+|   |   +-- ddraw_proxy.c # IDirectDraw7 COM proxy wrapper
+|   +-- include/
+|   |   +-- vtable_offsets.h  # DDraw/D3D vtable constants
+|   |   +-- shim_log.h       # Logging utilities
+|   +-- ddraw.def         # DLL export definitions
+|   +-- build/            # Compiled output
++-- GhidrAssistMCP/       # Ghidra MCP tools (for RE work)
++-- README.md             # This file
++-- TECHNICAL.md          # Deep technical documentation
++-- REVERSING.md          # Reverse engineering findings
+```
+
+## Launcher
+
+Double-click `Launch Secret Agent Barbie.bat` in the game folder for a settings menu:
+
+- **Resolution** — Original, 1024x768, 1080p, 1440p, or native max
+- **Aspect Ratio** — 4:3 pillarbox (recommended), stretch to fill, auto AR
+- **Display Mode** — Fullscreen or windowed
+- **Watermark** — Toggle dgVoodoo2 watermark
+
+Settings are saved to `dgVoodoo.conf` before launching.
+
+## Gamepad Support
+
+The game uses DirectInput 1-7 for keyboard/mouse only — no native gamepad support.
+
+**Recommended:** Use [AntiMicroX](https://github.com/AntiMicroX/antimicrox) (open source) or [JoyToKey](https://joytokey.net/) to map gamepad buttons to keyboard keys:
+
+| Action | Key | Suggested Gamepad |
+|--------|-----|-------------------|
+| Move | Arrow keys | Left stick |
+| Action/Use | Space | A button |
+| Gadget | Tab | Y button |
+| Menu | Escape | Start |
+| Camera | Mouse | Right stick |
+
+## Game Details
+
+- **Title:** Secret Agent(tm) Barbie(tm)
+- **Developer:** Gigawatt Studios
+- **Publisher:** Vivendi Universal
+- **Year:** 2001
+- **Engine:** Gigawatt Engine (custom)
+- **Platform:** Windows 95/98/2000/ME
+- **Graphics:** DirectDraw 7 + Direct3D 7
+- **Audio:** DirectSound
+- **Input:** DirectInput 1-7
+- **Cutscenes:** AVI (Cinepak codec)
+- **Binary:** 32-bit x86 PE, MSVC 6.0, ~6MB
+
+## Credits
+
+Reverse engineered and patched by a multi-agent team:
+- **Claude (Opus 4.6)** — Lead analyst, architecture, Ghidra RE, code review
+- **Codex (GPT-5.3-Spark)** — Patch engineer, wrote all proxy C code
+- **Kimi (K2.5)** — DDraw/DInput pipeline analysis, vtable mapping
+- **Kilo** — Toolchain research, compatibility testing, MCI analysis
+
+Built using [AgentChattr](https://github.com/bcurts/agentchattr) for multi-agent coordination, [GhidrAssistMCP](https://github.com/symgraph/GhidrAssistMCP) for Ghidra integration, and [dgVoodoo2](https://github.com/dege-diosg/dgVoodoo2) for rendering translation.

@@ -1,0 +1,34 @@
+# Original game files and local test installs
+game-files/
+*.pak
+*.avi
+Saves/
+
+# Original or locally copied game binaries/assets
+SecretAgent.exe
+Secret Agent Barbie.exe
+*.lnk
+BAgent.ico
+UnBAgent.ico
+Gigawatt.bin
+GsLibErr.tsf
+
+# Built patch artifacts
+shim-dll/build/
+shim-dll/*.dll
+launcher/*.exe
+release/
+dist/
+*.zip
+
+# Runtime logs and generated config from local testing
+*.log
+dgVoodoo.conf
+
+# Local/editor state
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
