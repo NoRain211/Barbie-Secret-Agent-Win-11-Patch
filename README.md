@@ -2,6 +2,8 @@
 
 A reverse-engineered compatibility solution that makes **Secret Agent Barbie** (2001, Gigawatt Studios / Vivendi Universal) run natively on Windows 11 — no VMs, no dosbox, just a clean game directory.
 
+The game is verified playable from start to finish with this patch.
+
 ## Quick Start
 
 1. Copy the game files from the CD/ISO into a folder (e.g. `game-files/`)
@@ -58,8 +60,8 @@ SecretAgent.exe
 - Audio (voices, music, sound effects)
 - Keyboard and mouse controls
 - Alt+Tab recovery
-- New York mission (completed)
-- Tokyo mission (loaded and playable)
+- Native gamepad support through the DirectInput/XInput shim
+- Full game completion from start to finish
 - No admin rights required
 
 ## Building the Proxy DLL
