@@ -113,17 +113,12 @@ Settings are saved to `dgVoodoo.conf` before launching.
 
 ## Gamepad Support
 
-The game uses DirectInput 1-7 for keyboard/mouse only — no native gamepad support.
+The game has native DirectInput gamepad support. The optional `dinput.dll`
+shim exposes modern Xbox/XInput controllers through the legacy DirectInput
+path so the game's own controller support can be used on Windows 10/11.
 
-**Recommended:** Use [AntiMicroX](https://github.com/AntiMicroX/antimicrox) (open source) or [JoyToKey](https://joytokey.net/) to map gamepad buttons to keyboard keys:
-
-| Action | Key | Suggested Gamepad |
-|--------|-----|-------------------|
-| Move | Arrow keys | Left stick |
-| Action/Use | Space | A button |
-| Gadget | Tab | Y button |
-| Menu | Escape | Start |
-| Camera | Mouse | Right stick |
+External mappers such as AntiMicroX, JoyToKey, or Steam Input are fallback
+options only if a specific controller does not behave correctly.
 
 ## Game Details
 

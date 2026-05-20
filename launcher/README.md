@@ -45,11 +45,12 @@ The launcher reads/writes `game-files/dgVoodoo.conf` to configure graphics setti
 
 ## Gamepad Support
 
-The launcher does not directly handle gamepad input. For controller support, use:
-- [AntiMicroX](https://github.com/AntiMicroX/antimicrox) (recommended)
-- [JoyToKey](https://joytokey.net/)
+The launcher does not directly handle gamepad input. The game itself has native
+DirectInput gamepad support, and the patch's `dinput.dll` shim exposes modern
+Xbox/XInput controllers through that legacy path.
 
-Both allow mapping gamepad buttons to keyboard inputs that the game recognizes.
+External mappers such as AntiMicroX, JoyToKey, or Steam Input are fallback
+options only if a specific controller does not behave correctly.
 
 ## Theme
 

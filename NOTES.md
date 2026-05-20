@@ -26,9 +26,9 @@ Ideas, potential improvements, and research topics that came up during the proje
 - Need to verify exact level names by playing through or RE'ing the level loader
 
 ## Gamepad Support
-- Current: JoyToKey / AntiMicroX for Xbox controller mapping
-- Future: dinputto8 drop-in DLL for native DI8 gamepad support
-- Steam Input also works (add as non-Steam game)
+- Game has native DirectInput gamepad support
+- Current patch: `dinput.dll` exposes modern Xbox/XInput controllers through the legacy DirectInput path
+- AntiMicroX, JoyToKey, or Steam Input are fallback options for controller-specific issues
 
 ## Pak Archive Format
 - Files: `art00.pak`, `arte0.pak` (Egypt), `artn0.pak` (NewYork), etc.
@@ -39,7 +39,7 @@ Ideas, potential improvements, and research topics that came up during the proje
 ## DirectInput Improvements
 - Game uses DISCL_EXCLUSIVE | DISCL_FOREGROUND
 - May cause input loss on Alt+Tab in some configurations
-- dinputto8 wrapper could fix this + add modern controller support
+- dinputto8-style wrapping could improve focus handling or controller compatibility
 - Currently not needed — controls work fine
 
 ## Audio Volume Normalization
