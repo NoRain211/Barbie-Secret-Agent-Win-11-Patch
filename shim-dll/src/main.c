@@ -25,7 +25,7 @@ static PFN_TerminateProcess g_fn_TerminateProcess = NULL;
 static PFN_GetDriveTypeA g_fn_GetDriveTypeA = NULL;
 static PFN_GetVolumeInformationA g_fn_GetVolumeInformationA = NULL;
 
-#define DDRAWSYM(name) static FARPROC g_fn_##name
+#define DDRAWSYM(name) FARPROC g_fn_##name
 #define MAX_REDIRECTED_KEYS 8
 
 typedef struct {

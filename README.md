@@ -5,11 +5,14 @@ A reverse-engineered compatibility solution that makes **Secret Agent Barbie** (
 ## Quick Start
 
 1. Copy the game files from the CD/ISO into a folder (e.g. `game-files/`)
-2. Copy these files into the game folder alongside `SecretAgent.exe`:
-   - `shim-dll/build/ddraw.dll` — our compatibility proxy
+2. Download the latest release zip and extract these files into the game folder
+   alongside `SecretAgent.exe`:
+   - `ddraw.dll` — our compatibility proxy
+   - `dinput.dll` — optional Xbox/XInput controller bridge for the game's native DirectInput support
    - `dgVoodoo_ddraw.dll` — dgVoodoo2 DDraw wrapper (from [dgVoodoo2 v2.86.5](https://github.com/dege-diosg/dgVoodoo2/releases))
    - `D3DImm.dll` — dgVoodoo2 Direct3D wrapper
-3. Run `SecretAgent.exe`
+   - `dgVoodoo.conf` — known-working dgVoodoo2 configuration
+3. Run `SecretAgent.exe`, or run `Secret Agent Barbie Launcher.exe` to adjust display settings first
 
 No admin rights required. No registry changes needed. No installer.
 
@@ -102,7 +105,7 @@ barbie-secret-agent-re/
 
 ## Launcher
 
-Double-click `Launch Secret Agent Barbie.bat` in the game folder for a settings menu:
+Double-click `Secret Agent Barbie Launcher.exe` in the game folder for a settings menu:
 
 - **Resolution** — Original, 1024x768, 1080p, 1440p, or native max
 - **Aspect Ratio** — 4:3 pillarbox (recommended), stretch to fill, auto AR

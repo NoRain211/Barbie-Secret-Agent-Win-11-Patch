@@ -45,6 +45,9 @@ release/
   README.txt
 ```
 
+The release zip must not include original game executables, `.pak` archives,
+cutscene videos, save files, logs, or local test-install folders.
+
 Then inspect the archive before uploading it:
 
 ```powershell
