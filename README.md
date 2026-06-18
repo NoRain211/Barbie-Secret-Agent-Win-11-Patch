@@ -124,7 +124,7 @@ Settings are saved to `dgVoodoo.conf` before launching.
 
 ## Gamepad Support
 
-The game has native DirectInput gamepad support. The optional `dinput.dll`
+The game has native DirectInput gamepad support. The `dinput.dll`
 shim exposes modern Xbox/XInput controllers through the legacy DirectInput
 path so the game's own controller support can be used on Windows 10/11.
 
