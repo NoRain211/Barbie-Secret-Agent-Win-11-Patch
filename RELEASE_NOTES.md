@@ -11,9 +11,12 @@ Initial Windows 10/11 compatibility release for Secret Agent Barbie.
 
 ## Install
 
-Extract the release zip into an existing Secret Agent Barbie game folder next
-to `SecretAgent.exe`, then run `SecretAgent.exe` or
-`Secret Agent Barbie Launcher.exe`.
+Copy the game files from the CD/ISO to a normal writable folder first. Do not
+run the game directly from the mounted ISO or CD.
+
+Extract the release zip into that copied game folder next to `SecretAgent.exe`,
+then run `SecretAgent.exe` or `Secret Agent Barbie Launcher.exe`. When the patch
+loads, it writes `ddraw_proxy.log` next to `SecretAgent.exe`.
 
 This release does not include the game, game executables, `.pak` archives,
 cutscenes, or other original copyrighted game assets.

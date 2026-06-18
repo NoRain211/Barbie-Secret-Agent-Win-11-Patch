@@ -6,7 +6,7 @@ The game is verified playable from start to finish with this patch.
 
 ## Quick Start
 
-1. Copy the game files from the CD/ISO into a folder (e.g. `game-files/`)
+1. Copy the game files from the CD/ISO into a normal writable folder (e.g. `C:\Games\Secret Agent Barbie`)
 2. Download the latest release zip and extract these files into the game folder
    alongside `SecretAgent.exe`:
    - `ddraw.dll` — our compatibility proxy
@@ -15,6 +15,10 @@ The game is verified playable from start to finish with this patch.
    - `D3DImm.dll` — dgVoodoo2 Direct3D wrapper
    - `dgVoodoo.conf` — known-working dgVoodoo2 configuration
 3. Run `SecretAgent.exe`, or run `Secret Agent Barbie Launcher.exe` to adjust display settings first
+
+Do not run the game directly from the mounted ISO or CD. The patch DLLs must be
+in the same writable folder as the `SecretAgent.exe` that you launch. When the
+patch loads, it writes `ddraw_proxy.log` next to `SecretAgent.exe`.
 
 No admin rights required. No registry changes needed. No installer.
 
