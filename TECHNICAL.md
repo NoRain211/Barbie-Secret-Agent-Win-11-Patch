@@ -121,12 +121,14 @@ The game expects HKLM keys that usually do not exist on modern installs.
   2. try real HKLM
   3. if both fail, return fake handle (`0xDEADxxxx` range)
 - Track redirected/fake handles in `g_redirected_keys`
-- Serve defaults during value queries for redirected handles
+- Mark HKCU, real HKLM, and fake handles as redirected
+- Serve shim defaults for known values during redirected-handle queries, so
+  stale installer `PATH`/`CDROM` values cannot override the copied game folder
 
 ### Default values currently served
 
-- `CDROM` = `C:\Users\NoRain\barbie-secret-agent-re\game-files\`
-- `PATH` = `C:\Users\NoRain\barbie-secret-agent-re\game-files\`
+- `CDROM` = directory containing the launched `SecretAgent.exe`
+- `PATH` = directory containing the launched `SecretAgent.exe`
 - `SETUP` = `3` (DWORD)
 - `LANGUAGE` = `ENG`
 - `Publisher` = `Gigawatt Studios`
@@ -176,15 +178,18 @@ The patcher uses `VirtualProtect(..., PAGE_READWRITE)` around each thunk update.
 - vectored exception handler (`AddVectoredExceptionHandler`)
 - `ExitProcess` hook
 - `TerminateProcess` hook
+- `CreateFileA` / `CreateDirectoryA` / `GetFileAttributesA` access-denied logging
 
 These were used during triage to distinguish crash vs intentional process termination during CRT startup.
+The process-exit hooks log the caller and then forward to the real process-exit
+API so diagnostics do not change shutdown behavior.
 
 ## Build and Artifacts
 
 ### Build command used for validated binary
 
 ```bash
-gcc -m32 -shared -DINITGUID \
+gcc -m32 -shared -DINITGUID -DSHIM_DEBUG \
   -o build/ddraw.dll \
   src/main.c src/ddraw_proxy.c \
   -Iinclude -lole32 -luuid \
@@ -194,21 +199,20 @@ gcc -m32 -shared -DINITGUID \
 
 ### Makefile
 
-`shim-dll/Makefile` provides a simpler default build (`CC=i686-w64-mingw32-gcc`, `-m32`, shared output).
+`shim-dll/Makefile` provides a simpler default build (`CC=gcc`, `-m32`, shared output, `SHIM_DEBUG` enabled).
 
 ## Operational Notes
 
 - `setup.cmd` in `game-files/` copies the latest shim build into the game folder and launches `SecretAgent.exe`
 - Final working deployment uses both:
   - `ddraw.dll` (this project)
-  - `dgVoodoo_ddraw.dll` + dgVoodoo companion DLLs
+  - `dgVoodoo_ddraw.dll` + dgVoodoo companion DLLs (`D3DImm.dll`, `D3D8.dll`, `D3D9.dll`)
 
 ## Known Limits / Future Improvements
 
-1. No launcher UI yet for resolution/backbuffer options
-2. Logging is still verbose (debug-friendly, not release-minimal)
-3. DirectInput cooperative mode hook is not yet implemented (not required for current pass)
-4. Save-file format tooling is out of scope for this shim and requires separate reverse engineering
+1. Logging is still verbose (debug-friendly, not release-minimal)
+2. DirectInput cooperative mode hook is not yet implemented (not required for current pass)
+3. Save-file format tooling is out of scope for this shim and requires separate reverse engineering
 
 ## Validation Outcome
 

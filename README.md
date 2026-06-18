@@ -13,12 +13,14 @@ The game is verified playable from start to finish with this patch.
    - `dinput.dll` — optional Xbox/XInput controller bridge for the game's native DirectInput support
    - `dgVoodoo_ddraw.dll` — dgVoodoo2 DDraw wrapper (from [dgVoodoo2 v2.86.5](https://github.com/dege-diosg/dgVoodoo2/releases))
    - `D3DImm.dll` — dgVoodoo2 Direct3D wrapper
+   - `D3D8.dll` and `D3D9.dll` — dgVoodoo2 runtime companions
    - `dgVoodoo.conf` — known-working dgVoodoo2 configuration
 3. Run `SecretAgent.exe`, or run `Secret Agent Barbie Launcher.exe` to adjust display settings first
 
 Do not run the game directly from the mounted ISO or CD. The patch DLLs must be
 in the same writable folder as the `SecretAgent.exe` that you launch. When the
-patch loads, it writes `ddraw_proxy.log` next to `SecretAgent.exe`.
+patch loads, it writes `ddraw_proxy.log` and `dinput_proxy.log` next to
+`SecretAgent.exe`.
 
 No admin rights required. No registry changes needed. No installer.
 
@@ -74,13 +76,11 @@ Requires TDM-GCC or MinGW with 32-bit support:
 
 ```bash
 cd shim-dll
-gcc -m32 -shared -DINITGUID \
-    -o build/ddraw.dll \
-    src/main.c src/ddraw_proxy.c \
-    -Iinclude -lole32 -luuid \
-    -Wall -Wextra ddraw.def \
-    -Wl,--enable-stdcall-fixup
+mingw32-make clean all
 ```
+
+The default Makefile build enables `SHIM_DEBUG` so release DLLs write
+`ddraw_proxy.log` and `dinput_proxy.log` during support triage.
 
 ## Project Structure
 
@@ -91,6 +91,8 @@ barbie-secret-agent-re/
 |   +-- ddraw.dll         # Our proxy (built from shim-dll/)
 |   +-- dgVoodoo_ddraw.dll  # dgVoodoo2 DDraw wrapper
 |   +-- D3DImm.dll        # dgVoodoo2 D3D wrapper
+|   +-- D3D8.dll          # dgVoodoo2 D3D8 wrapper
+|   +-- D3D9.dll          # dgVoodoo2 D3D9 wrapper
 |   +-- Pak/              # Game data archives
 |   +-- Video/            # Cutscene AVIs (Cinepak)
 |   +-- Saves/            # Save data

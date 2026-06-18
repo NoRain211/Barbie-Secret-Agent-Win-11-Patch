@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
 #include <windows.h>
 
 static FILE* g_log_file = NULL;
@@ -16,7 +17,7 @@ static inline void shim_log_init(void) {
   char* slash = strrchr(path, '\\');
   if (slash) *(slash + 1) = '\0';
   strcat(path, "ddraw_proxy.log");
-  g_log_file = fopen(path, "w");
+  g_log_file = fopen(path, "a");
 }
 
 static inline void shim_log(const char* fmt, ...) {

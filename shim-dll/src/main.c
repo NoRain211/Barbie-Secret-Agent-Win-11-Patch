@@ -13,17 +13,26 @@ static bool g_registry_hooks_ready = false;
 typedef LONG (WINAPI* PFN_RegOpenKeyExA)(HKEY, LPCSTR, DWORD, REGSAM, PHKEY);
 typedef LONG (WINAPI* PFN_RegQueryValueExA)(HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
 typedef LONG (WINAPI* PFN_RegCloseKey)(HKEY);
+typedef VOID (WINAPI* PFN_ExitProcess)(UINT);
 typedef BOOL (WINAPI* PFN_TerminateProcess)(HANDLE, UINT);
 typedef UINT (WINAPI* PFN_GetDriveTypeA)(LPCSTR);
 typedef BOOL (WINAPI* PFN_GetVolumeInformationA)(LPCSTR, LPSTR, DWORD, LPDWORD, LPDWORD,
                                                LPDWORD, LPSTR, DWORD);
+typedef HANDLE (WINAPI* PFN_CreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES,
+                                        DWORD, DWORD, HANDLE);
+typedef BOOL (WINAPI* PFN_CreateDirectoryA)(LPCSTR, LPSECURITY_ATTRIBUTES);
+typedef DWORD (WINAPI* PFN_GetFileAttributesA)(LPCSTR);
 
 static PFN_RegOpenKeyExA g_fn_RegOpenKeyExA = NULL;
 static PFN_RegQueryValueExA g_fn_RegQueryValueExA = NULL;
 static PFN_RegCloseKey g_fn_RegCloseKey = NULL;
+static PFN_ExitProcess g_fn_ExitProcess = NULL;
 static PFN_TerminateProcess g_fn_TerminateProcess = NULL;
 static PFN_GetDriveTypeA g_fn_GetDriveTypeA = NULL;
 static PFN_GetVolumeInformationA g_fn_GetVolumeInformationA = NULL;
+static PFN_CreateFileA g_fn_CreateFileA = NULL;
+static PFN_CreateDirectoryA g_fn_CreateDirectoryA = NULL;
+static PFN_GetFileAttributesA g_fn_GetFileAttributesA = NULL;
 
 #define DDRAWSYM(name) FARPROC g_fn_##name
 #define MAX_REDIRECTED_KEYS 8
@@ -95,7 +104,16 @@ static BOOL WINAPI shim_GetVolumeInformationA(LPCSTR lpRootPathName, LPSTR lpVol
                                             LPDWORD lpFileSystemFlags, LPSTR lpFileSystemNameBuffer,
                                             DWORD nFileSystemNameSize);
 static void WINAPI shim_exit_hook(UINT code);
-static void WINAPI shim_terminate_process_hook(HANDLE hProcess, UINT code);
+static BOOL WINAPI shim_terminate_process_hook(HANDLE hProcess, UINT code);
+static HANDLE WINAPI shim_CreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess,
+                                      DWORD dwShareMode,
+                                      LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+                                      DWORD dwCreationDisposition,
+                                      DWORD dwFlagsAndAttributes,
+                                      HANDLE hTemplateFile);
+static BOOL WINAPI shim_CreateDirectoryA(LPCSTR lpPathName,
+                                         LPSECURITY_ATTRIBUTES lpSecurityAttributes);
+static DWORD WINAPI shim_GetFileAttributesA(LPCSTR lpFileName);
 
 static void init_runtime_paths(void) {
   char exe_path[MAX_PATH];
@@ -301,7 +319,9 @@ static LONG WINAPI hooked_RegOpenKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD ulOpti
     /* Try real HKLM */
     status = g_fn_RegOpenKeyExA(HKEY_LOCAL_MACHINE, lpSubKey, ulOptions, samDesired, phkResult);
     if (status == ERROR_SUCCESS) {
-      shim_log("RegOpenKeyExA: HKLM key found");
+      store_redirected_key(*phkResult);
+      shim_log("RegOpenKeyExA: HKLM key found, overriding known values (handle=%p)",
+               (void*)*phkResult);
       return status;
     }
     /* Both failed — return a fake handle so query hook can serve defaults */
@@ -428,6 +448,7 @@ static bool patch_iat_for_hooks(HMODULE module) {
         *live_ptr = (DWORD_PTR)hooked_RegCloseKey;
         patched = true;
       } else if (is_kernel32 && strcmp(function_name, "ExitProcess") == 0) {
+        g_fn_ExitProcess = (PFN_ExitProcess)*live_ptr;
         *live_ptr = (DWORD_PTR)shim_exit_hook;
         patched = true;
       } else if (is_kernel32 && strcmp(function_name, "TerminateProcess") == 0) {
@@ -441,6 +462,18 @@ static bool patch_iat_for_hooks(HMODULE module) {
       } else if (is_kernel32 && strcmp(function_name, "GetVolumeInformationA") == 0) {
         g_fn_GetVolumeInformationA = (PFN_GetVolumeInformationA)*live_ptr;
         *live_ptr = (DWORD_PTR)shim_GetVolumeInformationA;
+        patched = true;
+      } else if (is_kernel32 && strcmp(function_name, "CreateFileA") == 0) {
+        g_fn_CreateFileA = (PFN_CreateFileA)*live_ptr;
+        *live_ptr = (DWORD_PTR)shim_CreateFileA;
+        patched = true;
+      } else if (is_kernel32 && strcmp(function_name, "CreateDirectoryA") == 0) {
+        g_fn_CreateDirectoryA = (PFN_CreateDirectoryA)*live_ptr;
+        *live_ptr = (DWORD_PTR)shim_CreateDirectoryA;
+        patched = true;
+      } else if (is_kernel32 && strcmp(function_name, "GetFileAttributesA") == 0) {
+        g_fn_GetFileAttributesA = (PFN_GetFileAttributesA)*live_ptr;
+        *live_ptr = (DWORD_PTR)shim_GetFileAttributesA;
         patched = true;
       }
 
@@ -634,16 +667,86 @@ static void WINAPI shim_exit_hook(UINT code) {
   void* ret_addr = __builtin_return_address(0);
   shim_log("  caller return address: 0x%08lx", (unsigned long)(uintptr_t)ret_addr);
   shim_log_close();
+  if (g_fn_ExitProcess != NULL) {
+    g_fn_ExitProcess(code);
+  }
+  TerminateProcess(GetCurrentProcess(), code);
 }
 
-static void WINAPI shim_terminate_process_hook(HANDLE hProcess, UINT code) {
+static BOOL WINAPI shim_terminate_process_hook(HANDLE hProcess, UINT code) {
   shim_log("!!! TerminateProcess called (process=%p, code=%u) !!!", hProcess, code);
   void* ret_addr = __builtin_return_address(0);
   shim_log("  caller return address: 0x%08lx", (unsigned long)(uintptr_t)ret_addr);
   shim_log_close();
   if (g_fn_TerminateProcess != NULL) {
-    g_fn_TerminateProcess(hProcess, code);
+    return g_fn_TerminateProcess(hProcess, code);
   }
+  SetLastError(ERROR_PROC_NOT_FOUND);
+  return FALSE;
+}
+
+static HANDLE WINAPI shim_CreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess,
+                                      DWORD dwShareMode,
+                                      LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+                                      DWORD dwCreationDisposition,
+                                      DWORD dwFlagsAndAttributes,
+                                      HANDLE hTemplateFile) {
+  if (g_fn_CreateFileA == NULL) {
+    SetLastError(ERROR_PROC_NOT_FOUND);
+    return INVALID_HANDLE_VALUE;
+  }
+
+  HANDLE result = g_fn_CreateFileA(lpFileName, dwDesiredAccess, dwShareMode,
+                                   lpSecurityAttributes, dwCreationDisposition,
+                                   dwFlagsAndAttributes, hTemplateFile);
+  if (result == INVALID_HANDLE_VALUE) {
+    DWORD err = GetLastError();
+    if (err == ERROR_ACCESS_DENIED) {
+      shim_log("CreateFileA: ACCESS DENIED path='%s' access=0x%08lx share=0x%08lx "
+               "disposition=0x%08lx attrs=0x%08lx",
+               lpFileName ? lpFileName : "(null)", dwDesiredAccess, dwShareMode,
+               dwCreationDisposition, dwFlagsAndAttributes);
+    }
+    SetLastError(err);
+  }
+  return result;
+}
+
+static BOOL WINAPI shim_CreateDirectoryA(LPCSTR lpPathName,
+                                         LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
+  if (g_fn_CreateDirectoryA == NULL) {
+    SetLastError(ERROR_PROC_NOT_FOUND);
+    return FALSE;
+  }
+
+  BOOL result = g_fn_CreateDirectoryA(lpPathName, lpSecurityAttributes);
+  if (!result) {
+    DWORD err = GetLastError();
+    if (err == ERROR_ACCESS_DENIED) {
+      shim_log("CreateDirectoryA: ACCESS DENIED path='%s'",
+               lpPathName ? lpPathName : "(null)");
+    }
+    SetLastError(err);
+  }
+  return result;
+}
+
+static DWORD WINAPI shim_GetFileAttributesA(LPCSTR lpFileName) {
+  if (g_fn_GetFileAttributesA == NULL) {
+    SetLastError(ERROR_PROC_NOT_FOUND);
+    return INVALID_FILE_ATTRIBUTES;
+  }
+
+  DWORD result = g_fn_GetFileAttributesA(lpFileName);
+  if (result == INVALID_FILE_ATTRIBUTES) {
+    DWORD err = GetLastError();
+    if (err == ERROR_ACCESS_DENIED) {
+      shim_log("GetFileAttributesA: ACCESS DENIED path='%s'",
+               lpFileName ? lpFileName : "(null)");
+    }
+    SetLastError(err);
+  }
+  return result;
 }
 
 static bool is_fake_cdrom_path(const char* path) {

@@ -58,11 +58,10 @@ static bool g_using_dgvoodoo_chain = false;
 
 static bool load_real_ddraw_module(void);
 static void* create_proxy_ddraw7(IDirectDraw7* real_object);
-static void log_display_mode_request(DWORD width, DWORD height, DWORD bpp,
-                                    DWORD refresh_rate, DWORD flags);
 static bool try_adjust_surface_desc(const LPDDSURFACEDESC2 surface_desc,
                                    DDSURFACEDESC2* adjusted_desc);
 static bool is_target_ddraw_iid(REFIID riid);
+static PFN_SetAppCompatData resolve_SetAppCompatData(HMODULE module);
 
 static HRESULT WINAPI proxy_QueryInterface(ProxyIDirectDraw7* this_ptr, REFIID riid,
                                           LPVOID* ppvObj);
@@ -146,8 +145,7 @@ static bool load_real_ddraw_module(void) {
           if (g_fn_DirectDrawCreateEx != NULL) {
             g_using_dgvoodoo_chain = true;
             if (g_fn_SetAppCompatData == NULL) {
-              g_fn_SetAppCompatData = (PFN_SetAppCompatData)GetProcAddress(g_real_ddraw_module,
-                                                                           "SetAppCompatData");
+              g_fn_SetAppCompatData = resolve_SetAppCompatData(g_real_ddraw_module);
             }
             return true;
           }
@@ -180,22 +178,19 @@ static bool load_real_ddraw_module(void) {
   g_fn_DirectDrawCreateEx = (PFN_DirectDrawCreateEx)GetProcAddress(g_real_ddraw_module,
                                                                  "DirectDrawCreateEx");
   if (g_fn_SetAppCompatData == NULL) {
-    g_fn_SetAppCompatData = (PFN_SetAppCompatData)GetProcAddress(g_real_ddraw_module,
-                                                                 "SetAppCompatData");
+    g_fn_SetAppCompatData = resolve_SetAppCompatData(g_real_ddraw_module);
   }
   return g_fn_DirectDrawCreateEx != NULL;
 }
 
-static void log_display_mode_request(DWORD width, DWORD height, DWORD bpp,
-                                    DWORD refresh_rate, DWORD flags) {
-  char message[256];
-  int written = snprintf(message, sizeof(message),
-                        "[ddraw proxy] SetDisplayMode request: %lux%lu x%lubpp, "
-                        "refresh=%lu, flags=0x%08lx\r\n",
-                        width, height, bpp, refresh_rate, flags);
-  if (written > 0) {
-    OutputDebugStringA(message);
-  }
+static PFN_SetAppCompatData resolve_SetAppCompatData(HMODULE module) {
+  union {
+    FARPROC raw;
+    PFN_SetAppCompatData typed;
+  } proc;
+
+  proc.raw = GetProcAddress(module, "SetAppCompatData");
+  return proc.typed;
 }
 
 static bool is_target_ddraw_iid(REFIID riid) {

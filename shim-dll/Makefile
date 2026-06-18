@@ -1,5 +1,5 @@
-CC ?= i686-w64-mingw32-gcc
-CFLAGS ?= -std=gnu11 -Wall -Wextra -O2 -m32 -DINITGUID -Iinclude
+CC = gcc
+CFLAGS ?= -std=gnu11 -Wall -Wextra -O2 -m32 -DINITGUID -DSHIM_DEBUG -Iinclude
 LDFLAGS ?= -shared
 LDLIBS ?= -lole32 -luuid
 
@@ -21,12 +21,13 @@ $(DDRAW_OUT): $(DDRAW_SRC)
 $(DINPUT_OUT): $(DINPUT_SRC)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(DINPUT_DEF) $(LDLIBS) -Wl,--enable-stdcall-fixup
 
-# Debug builds with logging
+# Explicit debug aliases. Distributed builds also keep logging enabled so
+# support reports can confirm the shims loaded.
 debug-ddraw: $(DDRAW_SRC)
-	$(CC) $(CFLAGS) -DSHIM_DEBUG -o $(DDRAW_OUT) $^ $(LDFLAGS) $(DDRAW_DEF) $(LDLIBS) -Wl,--enable-stdcall-fixup
+	$(CC) $(CFLAGS) -o $(DDRAW_OUT) $^ $(LDFLAGS) $(DDRAW_DEF) $(LDLIBS) -Wl,--enable-stdcall-fixup
 
 debug-dinput: $(DINPUT_SRC)
-	$(CC) $(CFLAGS) -DSHIM_DEBUG -o $(DINPUT_OUT) $^ $(LDFLAGS) $(DINPUT_DEF) $(LDLIBS) -Wl,--enable-stdcall-fixup
+	$(CC) $(CFLAGS) -o $(DINPUT_OUT) $^ $(LDFLAGS) $(DINPUT_DEF) $(LDLIBS) -Wl,--enable-stdcall-fixup
 
 clean:
 	rm -f $(DDRAW_OUT) $(DINPUT_OUT)
