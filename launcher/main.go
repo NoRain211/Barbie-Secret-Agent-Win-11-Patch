@@ -86,13 +86,15 @@ func detectMonitors() []monitor {
 }
 
 type config struct {
-	Resolution string    `json:"resolution"`
-	Scaling    string    `json:"scaling"`
-	FOVFactor  float64   `json:"fovFactor"`
-	Fullscreen bool      `json:"fullscreen"`
-	Monitor    string    `json:"monitor"`
-	Monitors   []monitor `json:"monitors"`
-	Error      string    `json:"error,omitempty"`
+	Resolution  string    `json:"resolution"`
+	Scaling     string    `json:"scaling"`
+	FOVFactor   float64   `json:"fovFactor"`
+	Fullscreen  bool      `json:"fullscreen"`
+	SkipIntro   bool      `json:"skipIntro"`
+	BackupSaves bool      `json:"backupSaves"`
+	Monitor     string    `json:"monitor"`
+	Monitors    []monitor `json:"monitors"`
+	Error       string    `json:"error,omitempty"`
 }
 
 type monitor struct {
@@ -149,7 +151,7 @@ func main() {
 		WindowOptions: webview2.WindowOptions{
 			Title:  "Secret Agent Barbie",
 			Width:  480,
-			Height: 620,
+			Height: 720,
 			Center: true,
 		},
 	})
@@ -203,11 +205,8 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		cfg.Error = err.Error()
 	}
-	if fovFactor, enabled, wsErr := loadWidescreenConfig(widescreenPath); wsErr == nil {
-		cfg.FOVFactor = fovFactor
-		if !enabled {
-			cfg.Resolution = "unforced"
-		}
+	if wsErr := loadWidescreenConfig(widescreenPath, &cfg); wsErr != nil {
+		cfg.Error = wsErr.Error()
 	}
 	cfg.Monitors = detectMonitors()
 	writeJSON(w, http.StatusOK, cfg)
@@ -245,7 +244,7 @@ func handleLaunch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "Could not save widescreen settings: " + err.Error()})
 		return
 	}
-	if err := launchGame(gameDir); err != nil {
+	if err := launchGame(gameDir, cfg.BackupSaves); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "Could not launch game: " + err.Error()})
 		return
 	}
@@ -265,12 +264,17 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func launchGame(dir string) error {
+func launchGame(dir string, backup bool) error {
 	gamePath := filepath.Join(dir, "SecretAgent.exe")
 	if info, err := os.Stat(gamePath); err != nil {
 		return err
 	} else if info.IsDir() {
 		return fmt.Errorf("%s is not a file", gamePath)
+	}
+	if backup {
+		if err := backupSaves(dir); err != nil {
+			return fmt.Errorf("save backup failed (fix the error or turn off Automatic save backups): %w", err)
+		}
 	}
 	cmd := exec.Command(gamePath)
 	cmd.Dir = dir
@@ -440,6 +444,16 @@ const launcherHTML = `<!DOCTYPE html>
         <input type="checkbox" id="fullscreen"> Fullscreen
       </label>
     </div>
+    <div class="checks">
+      <label class="check-item">
+        <input type="checkbox" id="skipIntro"> Skip intro videos and logos
+      </label>
+    </div>
+    <div class="checks">
+      <label class="check-item" title="Keep the five latest pre-launch snapshots in SaveBackups. Live saves are not changed.">
+        <input type="checkbox" id="backupSaves" checked> Automatic save backups (keep 5)
+      </label>
+    </div>
     <button id="launch" class="launch-btn" onclick="launchGame()">LAUNCH GAME</button>
     <div id="status" class="status" role="status"></div>
   </div>
@@ -463,6 +477,8 @@ const launcherHTML = `<!DOCTYPE html>
     });
     monSel.value = cfg.monitor || 'default';
     document.getElementById('fullscreen').checked = cfg.fullscreen || false;
+    document.getElementById('skipIntro').checked = cfg.skipIntro || false;
+    document.getElementById('backupSaves').checked = cfg.backupSaves !== false;
     if (cfg.error) statusEl.textContent = cfg.error;
   }).catch(err => { statusEl.textContent = 'Could not load settings: ' + err.message; });
 
@@ -476,6 +492,8 @@ const launcherHTML = `<!DOCTYPE html>
       fovFactor: Number(document.getElementById('fovFactor').value),
       monitor: document.getElementById('monitor').value,
       fullscreen: document.getElementById('fullscreen').checked,
+      skipIntro: document.getElementById('skipIntro').checked,
+      backupSaves: document.getElementById('backupSaves').checked,
     };
     try {
       const response = await fetch(api('/api/launch'), {
@@ -499,11 +517,12 @@ const launcherHTML = `<!DOCTYPE html>
 
 func defaultConfig() config {
 	return config{
-		Resolution: "max",
-		Scaling:    "stretched_ar",
-		FOVFactor:  1.0,
-		Fullscreen: true,
-		Monitor:    "default",
+		Resolution:  "max",
+		Scaling:     "stretched_ar",
+		FOVFactor:   1.0,
+		Fullscreen:  true,
+		BackupSaves: true,
+		Monitor:     "default",
 	}
 }
 
@@ -584,16 +603,15 @@ func validateConfig(cfg config) error {
 	return nil
 }
 
-func loadWidescreenConfig(path string) (float64, bool, error) {
+func loadWidescreenConfig(path string, cfg *config) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 1.0, true, nil
+			return nil
 		}
-		return 1.0, true, err
+		return err
 	}
 
-	fovFactor := 1.0
 	enabled := true
 	section := ""
 	for _, line := range strings.Split(string(data), "\n") {
@@ -612,11 +630,22 @@ func loadWidescreenConfig(path string) (float64, bool, error) {
 		}
 		if section == "[Settings]" && key == "FOVFactor" {
 			if parsed, parseErr := strconv.ParseFloat(value, 64); parseErr == nil {
-				fovFactor = parsed
+				cfg.FOVFactor = parsed
+			}
+		}
+		if section == "[Launcher]" {
+			switch key {
+			case "SkipIntro":
+				cfg.SkipIntro = strings.EqualFold(value, "true") || value == "1"
+			case "BackupSaves":
+				cfg.BackupSaves = strings.EqualFold(value, "true") || value == "1"
 			}
 		}
 	}
-	return fovFactor, enabled, nil
+	if !enabled {
+		cfg.Resolution = "unforced"
+	}
+	return nil
 }
 
 func widescreenDimensions(resolution string) (width, height int, enabled bool) {
@@ -642,6 +671,7 @@ func saveWidescreenConfig(path string, cfg config) error {
 	width, height, enabled := widescreenDimensions(cfg.Resolution)
 	contents := fmt.Sprintf("[Fix]\nEnabled=%t\n\n[Settings]\nWidth=%d\nHeight=%d\nFOVFactor=%s\n",
 		enabled, width, height, strconv.FormatFloat(cfg.FOVFactor, 'f', 3, 64))
+	contents += fmt.Sprintf("\n[Launcher]\nSkipIntro=%t\nBackupSaves=%t\n", cfg.SkipIntro, cfg.BackupSaves)
 	return os.WriteFile(path, []byte(contents), 0644)
 }
 

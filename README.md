@@ -127,6 +127,11 @@ Double-click `Secret Agent Barbie Launcher.exe` in the game folder for a setting
 - **Aspect Ratio** — native aspect ratio (recommended), 4:3 pillarbox, stretch, or centered
 - **Gameplay FOV multiplier** — optional adjustment on top of corrected Hor+ FOV
 - **Display Mode** — Fullscreen or windowed
+- **Skip intro videos and logos** — start at the main menu; off by default.
+  Requires the accompanying updated `ddraw.dll`. Gameplay cutscenes are unchanged.
+- **Automatic save backups** — on by default; keeps the five latest pre-launch
+  ZIP snapshots of the complete `Saves` folder in `SaveBackups`. Backups only run
+  when starting through the launcher. A failed backup stops launch and shows an error.
 
 Settings are saved to `dgVoodoo.conf` and
 `SecretAgentBarbieWidescreenFix.ini` before launching. A missing widescreen INI

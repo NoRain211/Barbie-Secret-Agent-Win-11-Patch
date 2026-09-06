@@ -97,6 +97,8 @@ func TestWidescreenConfig(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Resolution = "h:1920, v:1080"
 	cfg.FOVFactor = 1.15
+	cfg.SkipIntro = true
+	cfg.BackupSaves = false
 	if err := saveWidescreenConfig(path, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -110,14 +112,24 @@ func TestWidescreenConfig(t *testing.T) {
 			t.Errorf("saved widescreen config missing %q", want)
 		}
 	}
-	fovFactor, enabled, err := loadWidescreenConfig(path)
-	if err != nil || !enabled || fovFactor != 1.15 {
-		t.Fatalf("loadWidescreenConfig = (%v, %v, %v)", fovFactor, enabled, err)
+	loaded := defaultConfig()
+	if err := loadWidescreenConfig(path, &loaded); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Resolution == "unforced" || loaded.FOVFactor != 1.15 || !loaded.SkipIntro || loaded.BackupSaves {
+		t.Fatalf("loaded config = %+v", loaded)
+	}
+	cfg.Resolution = "unforced"
+	if err := saveWidescreenConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadWidescreenConfig(path, &loaded); err != nil || loaded.Resolution != "unforced" || !loaded.SkipIntro {
+		t.Fatalf("original resolution lost launcher options: %+v, %v", loaded, err)
 	}
 }
 
 func TestLaunchGameMissingExecutable(t *testing.T) {
-	if err := launchGame(t.TempDir()); err == nil {
+	if err := launchGame(t.TempDir(), true); err == nil {
 		t.Error("launchGame missing executable returned nil error")
 	}
 }

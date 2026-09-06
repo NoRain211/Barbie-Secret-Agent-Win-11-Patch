@@ -47,12 +47,36 @@ int main(int argc, char** argv) {
 
   unsigned char* writable = VirtualAlloc(NULL, nt->OptionalHeader.SizeOfImage,
                                          MEM_COMMIT | MEM_RESERVE,
-                                         PAGE_READWRITE);
+                                         PAGE_EXECUTE_READWRITE);
   if (writable == NULL) valid = false;
   if (writable != NULL) {
     memcpy(writable, image, nt->OptionalHeader.SizeOfImage);
-    const size_t splash_signatures[] = {0x000F490C, 0x000F4930, 0x00061F30};
-    for (size_t i = 0; i < 3; ++i) {
+    if (!widescreen_fix_test_skip_intro(writable, nt->OptionalHeader.SizeOfImage, false) ||
+        memcmp(writable, image, nt->OptionalHeader.SizeOfImage) != 0) {
+      fprintf(stderr, "disabled intro skip changed the image\n");
+      valid = false;
+    }
+    writable[0xECC82] ^= 1;
+    if (widescreen_fix_test_skip_intro(writable, nt->OptionalHeader.SizeOfImage, true) ||
+        writable[0xECC89] != 0x74 || writable[0xECC8A] != 0x07) {
+      fprintf(stderr, "intro skip accepted an unknown signature\n");
+      valid = false;
+    }
+    writable[0xECC82] ^= 1;
+    if (widescreen_fix_test_skip_intro(writable, 64, true) ||
+        !widescreen_fix_test_skip_intro(writable, nt->OptionalHeader.SizeOfImage, true) ||
+        writable[0xECC89] != 0x90 || writable[0xECC8A] != 0x90) {
+      fprintf(stderr, "intro skip did not select the menu path\n");
+      valid = false;
+    }
+    writable[0xECC89] = 0x74;
+    writable[0xECC8A] = 0x07;
+    if (memcmp(writable, image, nt->OptionalHeader.SizeOfImage) != 0) {
+      fprintf(stderr, "intro skip modified unrelated bytes\n");
+      valid = false;
+    }
+    const size_t splash_signatures[] = {0x000F490C, 0x000F4930, 0x00061F30, 0x000B59F0};
+    for (size_t i = 0; i < sizeof(splash_signatures) / sizeof(splash_signatures[0]); ++i) {
       writable[splash_signatures[i]] ^= 1;
       if (widescreen_fix_verify_image(writable, nt->OptionalHeader.SizeOfImage)) {
         fprintf(stderr, "unexpected splash signature was accepted\n");
@@ -62,6 +86,28 @@ int main(int argc, char** argv) {
     }
     valid = valid && widescreen_fix_test_apply_resolution(
                          writable, nt->OptionalHeader.SizeOfImage, 2560, 1440);
+    if (writable[0xB59F0] != 0xE9) {
+      fprintf(stderr, "shared surface-loss guard was not installed\n");
+      valid = false;
+    } else {
+      /* Execute the installed jump, including the game's thiscall ABI. */
+      void (__attribute__((thiscall)) *record_error)(uint32_t*, uint32_t) =
+          (void*) (writable + 0xB59F0);
+      const uint32_t cases[][3] = {
+          {0, 0x887601C2u, 0},
+          {0, 0x80004005u, 0x80004005u},
+          {0, 0, 0xE0000000u},
+          {0x80004005u, 0x887601C2u, 0x80004005u},
+          {0x80004005u, 0x8876021Cu, 0x80004005u}};
+      for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        uint32_t object[] = {0x12345678, cases[i][0]};
+        record_error(object, cases[i][1]);
+        if (object[0] != 0x12345678 || object[1] != cases[i][2]) {
+          fprintf(stderr, "surface-loss recovery changed permanent error semantics\n");
+          valid = false;
+        }
+      }
+    }
     /* Both the first splash frame and its three-second redraw loop must use
        the engine's full-screen bitmap blit, not its native-size draw. */
     const size_t splash_calls[] = {0x000F490C, 0x000F4930};

@@ -13,6 +13,11 @@ Native widescreen rendering, proportional UI, and cursor fixes.
 - Fixed cursor bounds, duplicate cursor drawing, and exit-dialog hit testing.
 - Changed the post-intro splash to use the engine's full-screen bitmap draw.
 - Hardened launcher settings validation, error reporting, and shim startup.
+- Added optional intro skipping in the launcher (off by default).
+- Added automatic pre-launch save backups (on by default), retaining the five
+  latest snapshots. A failed backup blocks launch without changing live saves.
+- Fixed temporary DirectDraw surface loss being latched as a permanent error,
+  preventing a fatal splash dialog or black screen after intro focus loss.
 
 ## Install
 
@@ -22,8 +27,10 @@ resolution is the default. No original game files or extracted art are included.
 
 ## Validation
 
-Shim regression probes and launcher tests cover the release changes. Main-menu
-Exit was confirmed in game by the user. The final splash adjustment has passed
+Shim regression probes, launcher tests, and `go vet` cover the release changes.
+Intro focus-loss recovery was checked in game at 2560x1440 and returned to a
+rendered main menu. Intro skipping and save snapshots were also tested locally.
+Main-menu Exit was confirmed in game by the user. The final splash adjustment has passed
 the binary-patch regression checks but still needs visual confirmation;
 complete outfit/camera/hook and ultrawide playthrough validation is pending.
 Cutscene letterboxing may differ outside 4:3.

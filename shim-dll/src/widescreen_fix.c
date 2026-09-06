@@ -23,6 +23,7 @@
 #define EXTRA_RESOLUTION_RVA 0x000E0E98u
 #define MENU_RESOLUTION_RVA 0x000F47BDu
 #define FULLSCREEN_BITMAP_RVA 0x00061F30u
+#define RECORD_ERROR_RVA 0x000B59F0u
 
 static const size_t k_splash_call_rvas[] = {0x000F490Cu, 0x000F4930u};
 
@@ -40,6 +41,7 @@ typedef struct {
   uint8_t* menu_resolution;
   uint8_t* splash_calls[2];
   uint8_t* fullscreen_bitmap;
+  uint8_t* record_error;
 } patch_sites_t;
 
 static const char* const k_resolution_patterns[] = {
@@ -187,6 +189,14 @@ static bool find_patch_sites(uint8_t* base, size_t size, patch_sites_t* sites) {
       memcmp(base + FULLSCREEN_BITMAP_RVA, fullscreen_signature,
              sizeof(fullscreen_signature)) != 0) return false;
   sites->fullscreen_bitmap = base + FULLSCREEN_BITMAP_RVA;
+  const uint8_t error_signature[] = {
+      0x8B, 0x41, 0x04, 0x85, 0xC0, 0x75, 0x15, 0x8B, 0x44, 0x24, 0x04,
+      0x85, 0xC0, 0x75, 0x0A, 0xC7, 0x41, 0x04, 0x00, 0x00, 0x00, 0xE0,
+      0xC2, 0x04, 0x00, 0x89, 0x41, 0x04, 0xC2, 0x04, 0x00};
+  if (RECORD_ERROR_RVA + sizeof(error_signature) > size ||
+      memcmp(base + RECORD_ERROR_RVA, error_signature,
+             sizeof(error_signature)) != 0) return false;
+  sites->record_error = base + RECORD_ERROR_RVA;
   const uint8_t splash_signatures[2][5] = {
       {0x8B, 0x01, 0xFF, 0x50, 0x60},
       {0x8B, 0x11, 0xFF, 0x52, 0x60}};
@@ -240,6 +250,21 @@ static bool write_u32(void* address, uint32_t value) {
   return write_memory(address, &value, sizeof(value));
 }
 
+static bool apply_skip_intro(void* image, size_t image_size, bool enabled) {
+  if (!enabled) return true;
+  uint8_t* base;
+  size_t size;
+  const size_t rva = 0x000ECC82u;
+  const uint8_t signature[] = {0xE8, 0xD9, 0xC3, 0xFC, 0xFF, 0x84, 0xC0, 0x74, 0x07, 0x68};
+  if (!get_image_bounds(image, image_size, &base, &size) ||
+      rva + sizeof(signature) > size ||
+      memcmp(base + rva, signature, sizeof(signature)) != 0) return false;
+  /* Take the engine's MENUS startup path instead of LOGOS. No video files or
+     executable bytes on disk are changed, and gameplay cutscenes still play. */
+  const uint8_t nops[] = {0x90, 0x90};
+  return write_memory(base + rva + 7, nops, sizeof(nops));
+}
+
 static bool write_float(void* address, float value) {
   return write_memory(address, &value, sizeof(value));
 }
@@ -253,6 +278,13 @@ static bool install_jump(uint8_t* address, size_t replaced_length, const void* t
   int32_t displacement = (int32_t)((const uint8_t*)target - (address + 5));
   memcpy(patch + 1, &displacement, sizeof(displacement));
   return write_memory(address, patch, replaced_length);
+}
+
+__attribute__((thiscall)) static void record_error_hook(uint32_t* object, uint32_t error) {
+  /* The engine restores/reloads surfaces on activation. Latching temporary
+     DDERR_SURFACELOST here disables both bitmaps and the renderer forever. */
+  if (error == 0x887601C2u || object[1] != 0) return;
+  object[1] = error != 0 ? error : 0xE0000000u;
 }
 
 __attribute__((used, noinline)) static float adjust_overall_fov(float current) {
@@ -359,6 +391,7 @@ static bool load_settings(int* width, int* height) {
 
 static bool apply_resolution_and_aspect(const patch_sites_t* sites,
                                         int width, int height) {
+  if (!install_jump(sites->record_error, 5, record_error_hook)) return false;
   const size_t width_offsets[] = {6, 6, 6, 3, 3, 1, 8};
   const size_t height_offsets[] = {1, 1, 1, 19, 19, 29, 1};
   for (size_t i = 0; i < 7; ++i) {
@@ -403,13 +436,6 @@ bool widescreen_fix_init(void) {
   LONG state = InterlockedCompareExchange(&g_init_state, 1, 0);
   if (state != 0) return state == 2;
 
-  int width;
-  int height;
-  if (!load_settings(&width, &height)) {
-    InterlockedExchange(&g_init_state, 3);
-    return false;
-  }
-
   uint8_t* base;
   size_t size;
   HMODULE image = GetModuleHandleA(NULL);
@@ -418,6 +444,21 @@ bool widescreen_fix_init(void) {
   if (image != NULL && dos->e_magic == IMAGE_DOS_SIGNATURE) {
     IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)((uint8_t*)image + dos->e_lfanew);
     if (nt->Signature == IMAGE_NT_SIGNATURE) mapped_size = nt->OptionalHeader.SizeOfImage;
+  }
+
+  char path[MAX_PATH];
+  config_path(path);
+  if (read_profile_bool(path, "Launcher", "SkipIntro", false)) {
+    bool skipped = apply_skip_intro(image, mapped_size, true);
+    shim_log("Skip intro: %s", skipped ? "enabled" : "signature mismatch; left unchanged");
+  }
+
+  /* Intro skipping also works with the original 640x480 resolution. */
+  int width;
+  int height;
+  if (!load_settings(&width, &height)) {
+    InterlockedExchange(&g_init_state, 3);
+    return false;
   }
 
   patch_sites_t sites;
@@ -450,6 +491,10 @@ bool widescreen_fix_get_resolution(int* width, int* height) {
 }
 
 #ifdef WIDESCREEN_TEST
+bool widescreen_fix_test_skip_intro(void* image, size_t image_size, bool enabled) {
+  return apply_skip_intro(image, image_size, enabled);
+}
+
 bool widescreen_fix_verify_image(const void* image, size_t image_size) {
   uint8_t* base;
   size_t size;
