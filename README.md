@@ -140,7 +140,7 @@ Cutscene letterboxing may differ outside 4:3. See the validation limits in
 
 ## Gamepad Support
 
-The game has native DirectInput gamepad support. The optional `dinput.dll`
+The game has native DirectInput gamepad support. The `dinput.dll`
 shim exposes modern Xbox/XInput controllers through the legacy DirectInput
 path so the game's own controller support can be used on Windows 10/11.
 
