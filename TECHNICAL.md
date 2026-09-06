@@ -42,7 +42,9 @@ SecretAgent.exe
 
 ## Export Forwarding Layer
 
-`main.c` loads the real backend DLL (`dgVoodoo_ddraw.dll` first, system fallback) and resolves exported symbols into `g_fn_*` pointers.
+`main.c` resolves the real backend DLL (`dgVoodoo_ddraw.dll` first, system
+fallback) on the first forwarded DirectDraw call, outside `DllMain`, and caches
+the exported symbols in `g_fn_*` pointers.
 
 - 22 exports are declared in `ddraw.def`
 - Critical exports fail-fast if missing:
@@ -51,9 +53,15 @@ SecretAgent.exe
   - `DirectDrawCreateClipper`
   - `DirectDrawEnumerateA`
   - `DirectDrawEnumerateExA`
-- Optional exports are loaded opportunistically and can be null
+- Optional exports are loaded opportunistically. If the game calls an export
+  the backend does not provide, the shim terminates with
+  `ERROR_PROC_NOT_FOUND`; it never returns through an unknown stdcall signature.
 
 Most exports use naked forwarding stubs (`DDRAW_FORWARDER` macro). `DllCanUnloadNow` and `DllGetClassObject` use typed wrappers to avoid signature conflicts.
+
+`DllMain` performs only the timing-sensitive main-executable IAT patch. File
+logging is suspended during that patch, and backend DirectDraw/XInput DLLs are
+loaded lazily after process attachment to avoid loader-lock re-entry.
 
 ## DirectDraw Proxy (COM Wrapper)
 
@@ -91,6 +99,26 @@ A naive copied vtable crashes because the game calls methods with `this = proxy`
 - clear `DDSCAPS_VIDEOMEMORY` when forcing z-buffer system memory
 
 This addresses older D3D7 expectations on modern native ddraw paths.
+
+## Native Widescreen Patch
+
+`widescreen_fix_init()` runs once on the game's first `DirectDrawCreateEx`
+call, before display-mode and camera setup. It validates twelve unique byte
+signatures in the mapped `SecretAgent.exe` image before changing anything.
+
+- Eight unique resolution sites receive the selected width and height.
+- Three immediate float values receive the new aspect ratio, including the
+  outfit-selection view.
+- Two x86 hooks replace the overall and gameplay camera FOV loads. The overall
+  path applies Hor+ correction; the gameplay path applies the configurable FOV
+  multiplier without multiplying an already-modified value again.
+- All writes use module-relative locations, `VirtualProtect`, and
+  `FlushInstructionCache`. A signature mismatch leaves widescreen disabled.
+
+`SecretAgentBarbieWidescreenFix.ini` uses desktop resolution when Width or
+Height is zero. The default FOV factor is 1.0. The implementation is based on
+AlphaYellow's MIT-licensed v1.4 fix; attribution is retained in
+`THIRD_PARTY_NOTICES.md`.
 
 ## dgVoodoo2 Chaining
 
@@ -173,9 +201,8 @@ The patcher uses `VirtualProtect(..., PAGE_READWRITE)` around each thunk update.
 - Output path: `<game dir>\ddraw_proxy.log`
 - timestamped log entries for startup and critical hooks
 
-### Additional crash instrumentation
+### Additional diagnostics
 
-- vectored exception handler (`AddVectoredExceptionHandler`)
 - `ExitProcess` hook
 - `TerminateProcess` hook
 - `CreateFileA` / `CreateDirectoryA` / `GetFileAttributesA` access-denied logging
@@ -199,7 +226,7 @@ gcc -m32 -shared -DINITGUID -DSHIM_DEBUG \
 
 ### Makefile
 
-`shim-dll/Makefile` provides a simpler default build (`CC=gcc`, `-m32`, shared output, `SHIM_DEBUG` enabled).
+`shim-dll/Makefile` provides a simpler default build (`CC=gcc`, `-m32`, shared output, `SHIM_DEBUG` enabled). Run `mingw32-make test` to build both DLLs and execute the registry-hook, DirectInput logic, and black-box DDraw/DInput ABI probes.
 
 ## Operational Notes
 
@@ -211,7 +238,7 @@ gcc -m32 -shared -DINITGUID -DSHIM_DEBUG \
 ## Known Limits / Future Improvements
 
 1. Logging is still verbose (debug-friendly, not release-minimal)
-2. DirectInput cooperative mode hook is not yet implemented (not required for current pass)
+2. The XInput bridge exposes player 1 as the legacy joystick; additional local players are not currently enumerated
 3. Save-file format tooling is out of scope for this shim and requires separate reverse engineering
 
 ## Validation Outcome

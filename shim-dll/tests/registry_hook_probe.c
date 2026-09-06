@@ -100,6 +100,8 @@ int main(int argc, char** argv) {
   HKEY root_key = NULL;
   HKEY game_key = NULL;
   HKEY opened_key = NULL;
+  HKEY fake_key = NULL;
+  HKEY capacity_keys[8] = {0};
   HMODULE shim = NULL;
   FARPROC* open_slot = NULL;
   FARPROC* query_slot = NULL;
@@ -201,9 +203,84 @@ int main(int argc, char** argv) {
     goto cleanup;
   }
 
+  status = iat_RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                             "SOFTWARE\\Gigawatt Studios\\MissingProduct",
+                             0, KEY_READ, &fake_key);
+  if (status != ERROR_SUCCESS) {
+    print_last_error("RegOpenKeyExA(fake key)", status);
+    goto cleanup;
+  }
+  DWORD missing_len = 0;
+  status = iat_RegQueryValueExA(fake_key, "MissingValue", NULL, NULL, NULL,
+                                &missing_len);
+  if (status != ERROR_FILE_NOT_FOUND) {
+    fprintf(stderr, "MissingValue returned %ld; expected ERROR_FILE_NOT_FOUND\n", status);
+    goto cleanup;
+  }
+
+  probe_RegCloseKey iat_RegCloseKey = (probe_RegCloseKey)*close_slot;
+  iat_RegCloseKey(fake_key);
+  fake_key = NULL;
+  iat_RegCloseKey(opened_key);
+  opened_key = NULL;
+
+  for (int i = 0; i < 300; ++i) {
+    HKEY recycled_key = NULL;
+    status = iat_RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                               "SOFTWARE\\Gigawatt Studios\\MissingRecycled",
+                               0, KEY_READ, &recycled_key);
+    if (status != ERROR_SUCCESS) {
+      fprintf(stderr, "fake-handle recycle open %d failed: %ld\n", i, status);
+      goto cleanup;
+    }
+    missing_len = 0;
+    status = iat_RegQueryValueExA(recycled_key, "MissingValue", NULL, NULL, NULL,
+                                  &missing_len);
+    if (status != ERROR_FILE_NOT_FOUND) {
+      fprintf(stderr, "fake-handle recycle query %d failed: %ld\n", i, status);
+      iat_RegCloseKey(recycled_key);
+      goto cleanup;
+    }
+    iat_RegCloseKey(recycled_key);
+  }
+
+  for (int i = 0; i < 8; ++i) {
+    char key_name[96];
+    snprintf(key_name, sizeof(key_name),
+             "SOFTWARE\\Gigawatt Studios\\MissingProduct%d", i);
+    status = iat_RegOpenKeyExA(HKEY_LOCAL_MACHINE, key_name, 0, KEY_READ,
+                               &capacity_keys[i]);
+    if (status != ERROR_SUCCESS) {
+      fprintf(stderr, "redirected-key slot %d failed early: %ld\n", i, status);
+      goto cleanup;
+    }
+  }
+
+  HKEY overflow_key = NULL;
+  status = iat_RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                             "SOFTWARE\\Gigawatt Studios\\MissingOverflow",
+                             0, KEY_READ, &overflow_key);
+  if (status != ERROR_TOO_MANY_OPEN_FILES || overflow_key != NULL) {
+    fprintf(stderr, "redirected-key overflow returned %ld handle=%p\n",
+            status, (void*)overflow_key);
+    goto cleanup;
+  }
+
   exit_code = 0;
 
 cleanup:
+  for (int i = 0; i < 8; ++i) {
+    if (capacity_keys[i] != NULL && close_slot != NULL) {
+      probe_RegCloseKey close_key = (probe_RegCloseKey)*close_slot;
+      close_key(capacity_keys[i]);
+    }
+  }
+  if (fake_key != NULL) {
+    if (close_slot != NULL) {
+      probe_RegCloseKey iat_RegCloseKey = (probe_RegCloseKey)*close_slot;
+      iat_RegCloseKey(fake_key);
+    }
+  }
   if (opened_key != NULL) {
     if (close_slot != NULL) {
       probe_RegCloseKey iat_RegCloseKey = (probe_RegCloseKey)*close_slot;

@@ -3,25 +3,29 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <string.h>
 #include <windows.h>
 
-static FILE* g_log_file = NULL;
+extern FILE* g_log_file;
+extern bool g_log_suspended;
 
 #if defined(SHIM_DEBUG) || defined(DEBUG)
 
 static inline void shim_log_init(void) {
-  if (g_log_file != NULL) return;
+  if (g_log_suspended || g_log_file != NULL) return;
   char path[MAX_PATH];
-  GetModuleFileNameA(NULL, path, MAX_PATH);
+  DWORD path_len = GetModuleFileNameA(NULL, path, MAX_PATH);
+  if (path_len == 0 || path_len >= MAX_PATH) return;
   char* slash = strrchr(path, '\\');
   if (slash) *(slash + 1) = '\0';
-  strcat(path, "ddraw_proxy.log");
-  g_log_file = fopen(path, "a");
+  if (strcat_s(path, MAX_PATH, "ddraw_proxy.log") != 0) return;
+  g_log_file = fopen(path, "w");
 }
 
 static inline void shim_log(const char* fmt, ...) {
   va_list args;
+  if (g_log_suspended) return;
   if (g_log_file == NULL) shim_log_init();
   if (g_log_file == NULL) return;
 
@@ -50,6 +54,10 @@ static inline void shim_log_close(void) {
   }
 }
 
+static inline void shim_log_suspend(bool suspended) {
+  g_log_suspended = suspended;
+}
+
 #else
 
 static inline void shim_log_init(void) {
@@ -60,6 +68,10 @@ static inline void shim_log(const char* fmt, ...) {
 }
 
 static inline void shim_log_close(void) {
+}
+
+static inline void shim_log_suspend(bool suspended) {
+  (void)suspended;
 }
 
 #endif

@@ -4,44 +4,35 @@ A GUI launcher for Secret Agent Barbie (2001) with Windows 11 compatibility sett
 
 ## Features
 
-- **Resolution Selection**: Original, 640x480, 800x600, 1024x768, 1080p, 1440p, or Native Max
-- **Aspect Ratio Control**: 4:3 Pillarbox (recommended), Stretch, Auto AR, or Centered
+- **Resolution Selection**: Original, 1024x768, 1280x960, 1080p, 1440p, or Native Max
+- **Aspect Ratio Control**: Native aspect ratio (recommended), 4:3 Pillarbox, Stretch, or Centered
+- **Gameplay FOV Multiplier**: Fine-tune the corrected Hor+ camera FOV
 - **Fullscreen/Windowed Toggle**
-- **dgVoodoo Watermark Toggle** (off by default)
 - **2001 Barbie Aesthetic**: Hot pink theme matching the original game era
 
 ## Building
 
 ### Prerequisites
 - Go 1.21 or later
-- Fyne dependencies
+- Microsoft Edge WebView2 Runtime (included with Windows 11)
 
 ### Build Commands
 
 ```bash
-# Install Fyne
-go get fyne.io/fyne/v2
-
-# Build the launcher
-go build -o "Secret Agent Barbie Launcher.exe" main.go
-
-# Or build with specific icon (Windows)
-go build -ldflags="-H=windowsgui" -o "Secret Agent Barbie Launcher.exe" main.go
-```
-
-### Cross-compile from Linux/Mac to Windows
-
-```bash
-GOOS=windows GOARCH=amd64 go build -o "Secret Agent Barbie Launcher.exe" main.go
+go test ./...
+go build -ldflags="-H=windowsgui" -o "Secret Agent Barbie Launcher.exe" .
 ```
 
 ## Installation
 
 1. Build the launcher
-2. Place `Secret Agent Barbie Launcher.exe` in the `barbie-secret-agent-re` folder (sibling to `game-files/`)
+2. Place `Secret Agent Barbie Launcher.exe` beside `SecretAgent.exe` and `dgVoodoo.conf` in the writable game folder
 3. Double-click to run
 
-The launcher reads/writes `game-files/dgVoodoo.conf` to configure graphics settings before launching the game.
+The launcher reads and writes the adjacent `dgVoodoo.conf` and
+`SecretAgentBarbieWidescreenFix.ini`, then starts the adjacent
+`SecretAgent.exe`. Configuration or launch failures remain visible in the
+launcher instead of closing the window.
 
 ## Gamepad Support
 

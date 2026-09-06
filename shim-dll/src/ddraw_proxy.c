@@ -6,6 +6,8 @@
 
 #include "vtable_offsets.h"
 #include "shim_log.h"
+#include "menu_fix.h"
+#include "widescreen_fix.h"
 
 typedef HRESULT (WINAPI *PFN_DirectDrawCreateEx)(LPGUID, LPVOID*, REFIID, IUnknown*);
 typedef void (WINAPI* PFN_SetAppCompatData)(DWORD, DWORD);
@@ -47,7 +49,6 @@ typedef struct ProxyIDirectDraw7 {
   IDirectDraw7* real_object;
   void** real_vtable;
   void** proxy_vtable;
-  bool coop_downgraded;
   HWND game_hwnd;
 } ProxyIDirectDraw7;
 
@@ -62,6 +63,49 @@ static bool try_adjust_surface_desc(const LPDDSURFACEDESC2 surface_desc,
                                    DDSURFACEDESC2* adjusted_desc);
 static bool is_target_ddraw_iid(REFIID riid);
 static PFN_SetAppCompatData resolve_SetAppCompatData(HMODULE module);
+
+typedef struct WindowLogContext {
+  const char* phase;
+  HWND top_level;
+} WindowLogContext;
+
+static void log_window_details(const char* phase, const char* kind,
+                               HWND window, HWND top_level) {
+  RECT rect = {0};
+  char class_name[128] = {0};
+  char title[128] = {0};
+  GetWindowRect(window, &rect);
+  GetClassNameA(window, class_name, sizeof(class_name));
+  GetWindowTextA(window, title, sizeof(title));
+  shim_log("Window %s %s: hwnd=%p top=%p parent=%p owner=%p visible=%d "
+           "rect=%ld,%ld-%ld,%ld class='%s' title='%s'",
+           phase, kind, window, top_level, GetParent(window),
+           GetWindow(window, GW_OWNER), IsWindowVisible(window), rect.left,
+           rect.top, rect.right, rect.bottom, class_name, title);
+}
+
+static BOOL CALLBACK log_child_window(HWND window, LPARAM parameter) {
+  WindowLogContext* context = (WindowLogContext*)parameter;
+  log_window_details(context->phase, "child", window, context->top_level);
+  return TRUE;
+}
+
+static BOOL CALLBACK log_top_level_window(HWND window, LPARAM parameter) {
+  DWORD process_id = 0;
+  GetWindowThreadProcessId(window, &process_id);
+  if (process_id != GetCurrentProcessId()) return TRUE;
+
+  WindowLogContext* context = (WindowLogContext*)parameter;
+  context->top_level = window;
+  log_window_details(context->phase, "top", window, window);
+  EnumChildWindows(window, log_child_window, parameter);
+  return TRUE;
+}
+
+static void log_process_windows(const char* phase) {
+  WindowLogContext context = {phase, NULL};
+  EnumWindows(log_top_level_window, (LPARAM)&context);
+}
 
 static HRESULT WINAPI proxy_QueryInterface(ProxyIDirectDraw7* this_ptr, REFIID riid,
                                           LPVOID* ppvObj);
@@ -157,21 +201,18 @@ static bool load_real_ddraw_module(void) {
     }
   }
 
-  UINT path_len = GetSystemWindowsDirectoryW(dll_path, MAX_PATH);
-  if (path_len == 0 || path_len + 20 >= MAX_PATH) {
+  UINT path_len = GetSystemDirectoryW(dll_path, MAX_PATH);
+  if (path_len == 0 || path_len >= MAX_PATH) {
     return false;
   }
 
-  if (wcscat_s(dll_path, MAX_PATH, L"\\SysWOW64\\ddraw.dll") != 0) {
+  if (wcscat_s(dll_path, MAX_PATH, L"\\ddraw.dll") != 0) {
     return false;
   }
 
   g_real_ddraw_module = LoadLibraryW(dll_path);
   if (g_real_ddraw_module == NULL) {
-    g_real_ddraw_module = LoadLibraryW(L"C:\\Windows\\System32\\ddraw.dll");
-    if (g_real_ddraw_module == NULL) {
-      return false;
-    }
+    return false;
   }
   g_using_dgvoodoo_chain = false;
 
@@ -194,9 +235,7 @@ static PFN_SetAppCompatData resolve_SetAppCompatData(HMODULE module) {
 }
 
 static bool is_target_ddraw_iid(REFIID riid) {
-  return IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectDraw) ||
-         IsEqualIID(riid, &IID_IDirectDraw2) || IsEqualIID(riid, &IID_IDirectDraw4) ||
-         IsEqualIID(riid, &IID_IDirectDraw7);
+  return IsEqualIID(riid, &IID_IDirectDraw7);
 }
 
 static bool try_adjust_surface_desc(const LPDDSURFACEDESC2 surface_desc,
@@ -470,7 +509,6 @@ static HRESULT WINAPI proxy_RestoreDisplayMode(ProxyIDirectDraw7* this_ptr) {
 
 static HRESULT WINAPI proxy_SetCooperativeLevel(ProxyIDirectDraw7* this_ptr,
                                                HWND hWnd, DWORD dwFlags) {
-  this_ptr->coop_downgraded = false;
   if (hWnd) this_ptr->game_hwnd = hWnd;
   if ((dwFlags & (DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)) ==
       (DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)) {
@@ -490,12 +528,16 @@ static HRESULT WINAPI proxy_SetCooperativeLevel(ProxyIDirectDraw7* this_ptr,
 static HRESULT WINAPI proxy_SetDisplayMode(ProxyIDirectDraw7* this_ptr, DWORD dwWidth,
                                           DWORD dwHeight, DWORD dwBPP, DWORD dwRefreshRate,
                                           DWORD dwFlags) {
-  shim_log("SetDisplayMode: %lux%lu x%lubpp refresh=%lu flags=0x%lx coop_downgraded=%d",
-           dwWidth, dwHeight, dwBPP, dwRefreshRate, dwFlags, this_ptr->coop_downgraded);
-  if (this_ptr->coop_downgraded) {
-    shim_log("SetDisplayMode: SKIPPED (coop downgraded), returning DD_OK");
-    return DD_OK;
-  }
+  void* caller = __builtin_return_address(0);
+  uint8_t* executable_base = (uint8_t*)GetModuleHandleA(NULL);
+  uintptr_t caller_rva =
+      executable_base != NULL && (uint8_t*)caller >= executable_base
+          ? (uintptr_t)((uint8_t*)caller - executable_base)
+          : 0;
+  shim_log("SetDisplayMode: %lux%lu x%lubpp refresh=%lu flags=0x%lx "
+           "caller=%p rva=0x%08lx",
+           dwWidth, dwHeight, dwBPP, dwRefreshRate, dwFlags, caller,
+           (unsigned long)caller_rva);
 
   if (dwBPP == 16 && !g_using_dgvoodoo_chain) {
     shim_log("SetDisplayMode: forcing compatibility bpp 32 for 16bpp request (%lux%lux%lubpp)",
@@ -508,6 +550,7 @@ static HRESULT WINAPI proxy_SetDisplayMode(ProxyIDirectDraw7* this_ptr, DWORD dw
 
   HRESULT result = fn(this_ptr->real_object, dwWidth, dwHeight, dwBPP, dwRefreshRate, dwFlags);
   shim_log("SetDisplayMode: result=0x%08lx", (unsigned long)result);
+  log_process_windows("after-mode-set");
 
   /* After dgVoodoo2 sets the mode, resize the window to 2x for consistent sizing.
      dgVoodoo2 handles scaling internally — we just make the window larger. */
@@ -592,6 +635,13 @@ static HRESULT WINAPI proxy_EvaluateMode(ProxyIDirectDraw7* this_ptr, DWORD dwFl
 __declspec(dllexport) HRESULT WINAPI DirectDrawCreateEx(LPGUID lpGUID, LPVOID* lplpDD,
                                                        REFIID riid, IUnknown* pUnkOuter) {
   shim_log("DirectDrawCreateEx: called");
+  if (widescreen_fix_init()) {
+    int width;
+    int height;
+    if (widescreen_fix_get_resolution(&width, &height)) {
+      menu_fix_init(width, height);
+    }
+  }
   if (!load_real_ddraw_module()) {
     shim_log("DirectDrawCreateEx: FAILED to load real ddraw.dll");
     return E_FAIL;

@@ -10,6 +10,7 @@
 
 #include <windows.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -20,10 +21,11 @@ static FILE* g_log_file = NULL;
 static void di_log_init(void) {
     if (g_log_file) return;
     char path[MAX_PATH];
-    GetModuleFileNameA(NULL, path, MAX_PATH);
+    DWORD path_len = GetModuleFileNameA(NULL, path, MAX_PATH);
+    if (path_len == 0 || path_len >= MAX_PATH) return;
     char* s = strrchr(path, '\\');
     if (s) *(s + 1) = '\0';
-    strcat(path, "dinput_proxy.log");
+    if (strcat_s(path, MAX_PATH, "dinput_proxy.log") != 0) return;
     g_log_file = fopen(path, "w");
 }
 static void di_log(const char* fmt, ...) {
@@ -38,13 +40,9 @@ static void di_log(const char* fmt, ...) {
     fprintf(g_log_file, "\n");
     fflush(g_log_file);
 }
-static void di_log_close(void) {
-    if (g_log_file) { fclose(g_log_file); g_log_file = NULL; }
-}
 #else
 #define di_log_init()
 #define di_log(...)
-#define di_log_close()
 #endif
 
 /* ── DInput / XInput types (avoid SDK headers) ────────────────────── */
@@ -58,6 +56,9 @@ typedef long HRESULT_T;
 #define DIERR_NOTINITIALIZED    ((HRESULT_T)0x80070015)
 #define DIERR_NOTACQUIRED       ((HRESULT_T)0x8007001E)
 #define DIERR_NOTFOUND          ((HRESULT_T)0x80070002)
+#define DIERR_NOINTERFACE       ((HRESULT_T)0x80004002)
+#define E_POINTER_T             ((HRESULT_T)0x80004003)
+#define E_NOTIMPL_T             ((HRESULT_T)0x80004001)
 #define DIENUM_CONTINUE         1
 #define DIENUM_STOP             0
 #define DIDEVTYPE_JOYSTICK      4
@@ -137,7 +138,6 @@ typedef struct { WORD wButtons; BYTE bLeftTrigger, bRightTrigger;
                  SHORT sThumbLX, sThumbLY, sThumbRX, sThumbRY; } XINPUT_GAMEPAD;
 typedef struct { DWORD dwPacketNumber; XINPUT_GAMEPAD Gamepad; } XINPUT_STATE;
 typedef DWORD (WINAPI* PFN_XInputGetState)(DWORD, XINPUT_STATE*);
-typedef DWORD (WINAPI* PFN_XInputGetCapabilities)(DWORD, DWORD, void*);
 
 /* XInput button masks */
 #define XBTN_DPAD_UP    0x0001
@@ -162,6 +162,12 @@ typedef DWORD (WINAPI* PFN_XInputGetCapabilities)(DWORD, DWORD, void*);
 /* Axis range config (used by XInputDevice and xinput_read_joystate) */
 typedef struct { LONG range_min, range_max; DWORD deadzone_pct; } AxisConfig;
 #define NUM_AXES 6
+
+typedef struct {
+    BOOL space_down;
+    BOOL escape_down;
+    BOOL mouse_left_down;
+} SyntheticInputState;
 
 /* DInput callback types */
 typedef BOOL (CALLBACK* LPDIENUMDEVICESCALLBACKA)(const DIDEVICEINSTANCEA*, void*);
@@ -214,6 +220,9 @@ static const MY_GUID GUID_XInputPad = {
 static const MY_GUID IID_IDirectInputA  = { 0x89521360, 0xAA8A, 0x11CF, {0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00} };
 static const MY_GUID IID_IDirectInput2A = { 0x5944E662, 0xAA8A, 0x11CF, {0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00} };
 static const MY_GUID IID_IDirectInput7A = { 0x9A4CB684, 0x236D, 0x11D3, {0x8E,0x9D,0x00,0xC0,0x4F,0x68,0x44,0xAE} };
+static const MY_GUID IID_IDirectInputDeviceA  = { 0x5944E680, 0xC92E, 0x11CF, {0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00} };
+static const MY_GUID IID_IDirectInputDevice2A = { 0x5944E682, 0xC92E, 0x11CF, {0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00} };
+static const MY_GUID IID_IDirectInputDevice7A = { 0x57D7C6BC, 0x2356, 0x11D3, {0x8E,0x9D,0x00,0xC0,0x4F,0x68,0x44,0xAE} };
 static const MY_GUID MY_IID_IUnknown    = { 0x00000000, 0x0000, 0x0000, {0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46} };
 
 /* ── Globals ──────────────────────────────────────────────────────── */
@@ -236,9 +245,16 @@ static int guid_eq(const MY_GUID* a, const MY_GUID* b) {
 /* ── Apply deadzone to XInput thumbstick ──────────────────────────── */
 
 static SHORT apply_deadzone(SHORT val, SHORT dz) {
+    if (dz < 0) dz = 0;
+    if (dz >= 32767) dz = 32766;
     if (val > dz) return (SHORT)(((val - dz) * 32767L) / (32767 - dz));
     if (val < -dz) return (SHORT)(((val + dz) * 32767L) / (32767 - dz));
     return 0;
+}
+
+static SHORT configured_deadzone(const AxisConfig* axis) {
+    DWORD pct = axis->deadzone_pct > 10000 ? 10000 : axis->deadzone_pct;
+    return (SHORT)((pct * 32767UL) / 10000UL);
 }
 
 /* ── XInput → DIJOYSTATE mapping ──────────────────────────────────── */
@@ -249,7 +265,10 @@ static LONG scale_axis(LONG raw, LONG rmin, LONG rmax) {
     /* center = (rmin+rmax)/2, half_range = (rmax-rmin)/2 */
     LONG center = (rmin + rmax) / 2;
     LONG half = (rmax - rmin) / 2;
-    return center + (LONG)((int64_t)raw * half / 32767);
+    LONG scaled = center + (LONG)((int64_t)raw * half / 32767);
+    if (scaled < rmin) return rmin;
+    if (scaled > rmax) return rmax;
+    return scaled;
 }
 
 /* Scale a positive value (0..255) to the configured axis range */
@@ -260,9 +279,10 @@ static LONG scale_trigger(BYTE raw, LONG rmin, LONG rmax) {
 /* Inject mouse movement from a stick via SendInput */
 #define MOUSE_SENSITIVITY 15  /* pixels per poll at full deflection */
 
-static void inject_mouse_from_stick(SHORT raw_x, SHORT raw_y) {
-    SHORT dx = apply_deadzone(raw_x, THUMB_DEADZONE);
-    SHORT dy = apply_deadzone(raw_y, THUMB_DEADZONE);
+static void inject_mouse_from_stick(SHORT raw_x, SHORT raw_y,
+                                    SHORT deadzone_x, SHORT deadzone_y) {
+    SHORT dx = apply_deadzone(raw_x, deadzone_x);
+    SHORT dy = apply_deadzone(raw_y, deadzone_y);
     if (dx == 0 && dy == 0) return;
 
     int mx = (int)dx * MOUSE_SENSITIVITY / 32767;
@@ -278,22 +298,69 @@ static void inject_mouse_from_stick(SHORT raw_x, SHORT raw_y) {
     SendInput(1, &inp, sizeof(INPUT));
 }
 
-static BOOL xinput_read_joystate(DWORD user_idx, const AxisConfig axes[NUM_AXES], DIJOYSTATE* js) {
-    if (!g_XInputGetState) return FALSE;
+static BOOL inject_key(WORD scan, BOOL pressed) {
+    INPUT input;
+    memset(&input, 0, sizeof(input));
+    input.type = INPUT_KEYBOARD;
+    input.ki.wScan = scan;
+    input.ki.dwFlags = KEYEVENTF_SCANCODE | (pressed ? 0 : KEYEVENTF_KEYUP);
+    return SendInput(1, &input, sizeof(input)) == 1;
+}
+
+static BOOL inject_mouse_left(BOOL pressed) {
+    INPUT input;
+    memset(&input, 0, sizeof(input));
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = pressed ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+    return SendInput(1, &input, sizeof(input)) == 1;
+}
+
+static void set_synthetic_input(SyntheticInputState* state, BOOL space_down,
+                                BOOL escape_down, BOOL mouse_left_down) {
+    if (state->space_down != space_down) {
+        if (inject_key(0x39, space_down)) state->space_down = space_down;
+    }
+    if (state->escape_down != escape_down) {
+        if (inject_key(0x01, escape_down)) state->escape_down = escape_down;
+    }
+    if (state->mouse_left_down != mouse_left_down) {
+        if (inject_mouse_left(mouse_left_down)) state->mouse_left_down = mouse_left_down;
+    }
+}
+
+static void release_synthetic_input(SyntheticInputState* state) {
+    set_synthetic_input(state, FALSE, FALSE, FALSE);
+}
+
+static BOOL xinput_read_joystate(DWORD user_idx, const AxisConfig axes[NUM_AXES],
+                                 SyntheticInputState* synthetic, BOOL allow_injection,
+                                 DIJOYSTATE* js) {
+    if (!g_XInputGetState) {
+        release_synthetic_input(synthetic);
+        return FALSE;
+    }
     XINPUT_STATE xs;
     DWORD res = g_XInputGetState(user_idx, &xs);
-    if (res != 0) return FALSE;
+    if (res != 0) {
+        release_synthetic_input(synthetic);
+        return FALSE;
+    }
 
     memset(js, 0, sizeof(*js));
     XINPUT_GAMEPAD* gp = &xs.Gamepad;
     WORD btn = gp->wButtons;
 
-    /* Right stick → mouse cursor injection (camera/look) */
-    inject_mouse_from_stick(gp->sThumbRX, gp->sThumbRY);
+    if (allow_injection) {
+        inject_mouse_from_stick(gp->sThumbRX, gp->sThumbRY,
+                                configured_deadzone(&axes[3]),
+                                configured_deadzone(&axes[4]));
+    } else {
+        release_synthetic_input(synthetic);
+    }
 
     /* Left stick → movement axes (lX/lY) — analog */
-    SHORT ls_x = apply_deadzone(gp->sThumbLX, THUMB_DEADZONE);
-    SHORT ls_y = apply_deadzone(gp->sThumbLY, THUMB_DEADZONE);
+    SHORT ls_x = apply_deadzone(gp->sThumbLX, configured_deadzone(&axes[0]));
+    SHORT ls_y = apply_deadzone(gp->sThumbLY, configured_deadzone(&axes[1]));
 
     /* D-pad → movement axes (lX/lY) — digital override */
     int dpad_up    = !!(btn & XBTN_DPAD_UP);
@@ -310,12 +377,12 @@ static BOOL xinput_read_joystate(DWORD user_idx, const AxisConfig axes[NUM_AXES]
     } else {
         /* Left stick analog movement */
         js->lX = scale_axis(ls_x, axes[0].range_min, axes[0].range_max);
-        js->lY = scale_axis((SHORT)-ls_y, axes[1].range_min, axes[1].range_max);
+        js->lY = scale_axis(-(LONG)ls_y, axes[1].range_min, axes[1].range_max);
     }
 
     /* Right stick also on lRx/lRy for any game code that reads those */
-    js->lRx = scale_axis(apply_deadzone(gp->sThumbRX, THUMB_DEADZONE), axes[3].range_min, axes[3].range_max);
-    js->lRy = scale_axis(-apply_deadzone(gp->sThumbRY, THUMB_DEADZONE), axes[4].range_min, axes[4].range_max);
+    js->lRx = scale_axis(apply_deadzone(gp->sThumbRX, configured_deadzone(&axes[3])), axes[3].range_min, axes[3].range_max);
+    js->lRy = scale_axis(-apply_deadzone(gp->sThumbRY, configured_deadzone(&axes[4])), axes[4].range_min, axes[4].range_max);
 
     /* Triggers → Z axes */
     BYTE lt = gp->bLeftTrigger > TRIGGER_DEADZONE ? gp->bLeftTrigger : 0;
@@ -347,65 +414,12 @@ static BOOL xinput_read_joystate(DWORD user_idx, const AxisConfig axes[NUM_AXES]
     js->rgbButtons[8]  = (btn & XBTN_LTHUMB)    ? 0x80 : 0;
     js->rgbButtons[9]  = (btn & XBTN_RTHUMB)    ? 0x80 : 0;
 
-    /* ── Keyboard/mouse injection from Xbox buttons ─────────────── */
-    /* Track previous state for edge detection */
-    static WORD prev_btn = 0;
-    static BYTE prev_rt = 0;
-
-    /* Helper: inject a keyboard scan code press/release */
-    #define INJECT_KEY(scan, pressed) do { \
-        INPUT _inp; memset(&_inp, 0, sizeof(_inp)); \
-        _inp.type = INPUT_KEYBOARD; \
-        _inp.ki.wScan = (scan); \
-        _inp.ki.dwFlags = KEYEVENTF_SCANCODE | ((pressed) ? 0 : KEYEVENTF_KEYUP); \
-        SendInput(1, &_inp, sizeof(INPUT)); \
-    } while(0)
-
-    /* Helper: inject mouse button press/release */
-    #define INJECT_MOUSE_BTN(down_flag, up_flag, pressed) do { \
-        INPUT _inp; memset(&_inp, 0, sizeof(_inp)); \
-        _inp.type = INPUT_MOUSE; \
-        _inp.mi.dwFlags = (pressed) ? (down_flag) : (up_flag); \
-        SendInput(1, &_inp, sizeof(INPUT)); \
-    } while(0)
-
-    /* A button → Space (jump) — scan code 0x39 */
-    if ((btn & XBTN_A) && !(prev_btn & XBTN_A))
-        INJECT_KEY(0x39, 1);
-    else if (!(btn & XBTN_A) && (prev_btn & XBTN_A))
-        INJECT_KEY(0x39, 0);
-
-    /* B button → Left mouse click */
-    if ((btn & XBTN_B) && !(prev_btn & XBTN_B))
-        INJECT_MOUSE_BTN(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 1);
-    else if (!(btn & XBTN_B) && (prev_btn & XBTN_B))
-        INJECT_MOUSE_BTN(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0);
-
-    /* X button → Left mouse click (action/interact) */
-    if ((btn & XBTN_X) && !(prev_btn & XBTN_X))
-        INJECT_MOUSE_BTN(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 1);
-    else if (!(btn & XBTN_X) && (prev_btn & XBTN_X))
-        INJECT_MOUSE_BTN(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0);
-
-    /* Right trigger → Left mouse click (alternate action) */
-    BYTE rt_pressed = rt > 128;
-    BYTE prev_rt_pressed = prev_rt > 128;
-    if (rt_pressed && !prev_rt_pressed)
-        INJECT_MOUSE_BTN(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 1);
-    else if (!rt_pressed && prev_rt_pressed)
-        INJECT_MOUSE_BTN(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0);
-
-    /* Start → Escape (menu) — scan code 0x01 */
-    if ((btn & XBTN_START) && !(prev_btn & XBTN_START))
-        INJECT_KEY(0x01, 1);
-    else if (!(btn & XBTN_START) && (prev_btn & XBTN_START))
-        INJECT_KEY(0x01, 0);
-
-    prev_btn = btn;
-    prev_rt = rt;
-
-    #undef INJECT_KEY
-    #undef INJECT_MOUSE_BTN
+    if (allow_injection) {
+        set_synthetic_input(synthetic,
+                            (btn & XBTN_A) != 0,
+                            (btn & XBTN_START) != 0,
+                            (btn & (XBTN_B | XBTN_X)) != 0 || rt > 128);
+    }
 
     return TRUE;
 }
@@ -454,7 +468,6 @@ typedef struct {
 /* DIPROP_* are small integers, not real GUID pointers */
 #define DIPROP_RANGE     ((const MY_GUID*)(uintptr_t)4)
 #define DIPROP_DEADZONE  ((const MY_GUID*)(uintptr_t)5)
-#define DIPROP_SATURATION ((const MY_GUID*)(uintptr_t)6)
 #define IS_DIPROP(g)     ((uintptr_t)(g) < 0x1000)
 
 /* DIPH_* dwHow values */
@@ -472,7 +485,8 @@ struct XInputDevice {
     LONG ref_count;
     DWORD user_index;
     BOOL acquired;
-    DWORD data_size;
+    HWND hwnd;
+    SyntheticInputState synthetic;
     AxisConfig axes[NUM_AXES];  /* indexed by offset/4: 0=lX,1=lY,2=lZ,3=lRx,4=lRy,5=lRz */
 };
 
@@ -482,11 +496,18 @@ static HRESULT_T STDMETHODCALLTYPE xdev_QueryInterface(XInputDevice* self, const
     di_log("XInputDevice: QueryInterface(iid=%08lx-%04x-%04x) ppv=%p self=%p",
            riid ? riid->Data1 : 0, riid ? riid->Data2 : 0, riid ? riid->Data3 : 0,
            (void*)ppv, (void*)self);
-    if (!ppv) return (HRESULT_T)0x80000003L; /* E_POINTER */
-    /* Accept any DInput device IID — we implement them all through one vtable */
+    if (!ppv || !riid) return E_POINTER_T;
+    if (!guid_eq(riid, &MY_IID_IUnknown) &&
+        !guid_eq(riid, &IID_IDirectInputDeviceA) &&
+        !guid_eq(riid, &IID_IDirectInputDevice2A) &&
+        !guid_eq(riid, &IID_IDirectInputDevice7A)) {
+        *ppv = NULL;
+        return DIERR_NOINTERFACE;
+    }
     *ppv = self;
-    self->ref_count++;
-    di_log("XInputDevice: QI wrote *ppv=%p refcount=%ld", (void*)*ppv, self->ref_count);
+    LONG refs = InterlockedIncrement(&self->ref_count);
+    di_log("XInputDevice: QI wrote *ppv=%p refcount=%ld", (void*)*ppv, refs);
+    (void)refs;
     return DI_OK;
 }
 
@@ -497,6 +518,7 @@ static ULONG STDMETHODCALLTYPE xdev_AddRef(XInputDevice* self) {
 static ULONG STDMETHODCALLTYPE xdev_Release(XInputDevice* self) {
     LONG r = InterlockedDecrement(&self->ref_count);
     if (r <= 0) {
+        release_synthetic_input(&self->synthetic);
         di_log("XInputDevice: destroyed (user %lu)", self->user_index);
         HeapFree(GetProcessHeap(), 0, self);
     }
@@ -507,7 +529,12 @@ static HRESULT_T STDMETHODCALLTYPE xdev_GetCapabilities(XInputDevice* self, DIDE
     di_log("XInputDevice: GetCapabilities");
     (void)self;
     if (!caps) return DIERR_INVALIDPARAM;
-    memset(caps, 0, caps->dwSize);
+    DWORD size = caps->dwSize;
+    if (size != 6 * sizeof(DWORD) && size != sizeof(DIDEVCAPS)) {
+        return DIERR_INVALIDPARAM;
+    }
+    memset(caps, 0, size);
+    caps->dwSize = size;
     caps->dwFlags = 0;
     caps->dwDevType = DIDEVTYPE_JOYSTICK | (0x01 << 8);  /* subtype: gamepad */
     caps->dwAxes = 6;      /* lX, lY, lZ, lRx, lRy, lRz */
@@ -584,12 +611,21 @@ static HRESULT_T STDMETHODCALLTYPE xdev_EnumObjects(XInputDevice* s, void* cb, v
 static HRESULT_T STDMETHODCALLTYPE xdev_GetProperty(XInputDevice* self, const MY_GUID* g, void* h) {
     di_log("XInputDevice: GetProperty(prop=%lu)", IS_DIPROP(g) ? (unsigned long)(uintptr_t)g : 0);
     if (!h) return DIERR_INVALIDPARAM;
+    DIPROPHEADER* hdr = (DIPROPHEADER*)h;
+    if (hdr->dwHeaderSize != sizeof(DIPROPHEADER)) return DIERR_INVALIDPARAM;
+
+    DWORD idx = 0;
+    if (hdr->dwHow == DIPH_BYOFFSET) {
+        if (hdr->dwObj % 4 != 0 || hdr->dwObj / 4 >= (DWORD)NUM_AXES)
+            return DIERR_INVALIDPARAM;
+        idx = hdr->dwObj / 4;
+    } else if (hdr->dwHow != DIPH_DEVICE) {
+        return E_NOTIMPL_T;
+    }
 
     if (g == DIPROP_RANGE) {
         DIPROPRANGE* pr = (DIPROPRANGE*)h;
-        DWORD idx = 0;
-        if (pr->diph.dwHow == DIPH_BYOFFSET && pr->diph.dwObj / 4 < (DWORD)NUM_AXES)
-            idx = pr->diph.dwObj / 4;
+        if (hdr->dwSize != sizeof(DIPROPRANGE)) return DIERR_INVALIDPARAM;
         pr->lMin = self->axes[idx].range_min;
         pr->lMax = self->axes[idx].range_max;
         return DI_OK;
@@ -597,33 +633,37 @@ static HRESULT_T STDMETHODCALLTYPE xdev_GetProperty(XInputDevice* self, const MY
 
     if (g == DIPROP_DEADZONE) {
         DIPROPDWORD* pd = (DIPROPDWORD*)h;
-        DWORD idx = 0;
-        if (pd->diph.dwHow == DIPH_BYOFFSET && pd->diph.dwObj / 4 < (DWORD)NUM_AXES)
-            idx = pd->diph.dwObj / 4;
+        if (hdr->dwSize != sizeof(DIPROPDWORD)) return DIERR_INVALIDPARAM;
         pd->dwData = self->axes[idx].deadzone_pct;
         return DI_OK;
     }
 
-    return DI_OK;
+    return E_NOTIMPL_T;
 }
 
 static HRESULT_T STDMETHODCALLTYPE xdev_SetProperty(XInputDevice* self, const MY_GUID* g, const void* h) {
     if (!h) return DIERR_INVALIDPARAM;
     const DIPROPHEADER* hdr = (const DIPROPHEADER*)h;
+    if (hdr->dwHeaderSize != sizeof(DIPROPHEADER)) return DIERR_INVALIDPARAM;
 
     if (g == DIPROP_RANGE) {
         const DIPROPRANGE* pr = (const DIPROPRANGE*)h;
         di_log("XInputDevice: SetProperty DIPROP_RANGE obj=%lu how=%lu min=%ld max=%ld",
                hdr->dwObj, hdr->dwHow, pr->lMin, pr->lMax);
+        if (hdr->dwSize != sizeof(DIPROPRANGE) || pr->lMin >= pr->lMax)
+            return DIERR_INVALIDPARAM;
         if (hdr->dwHow == DIPH_DEVICE) {
             /* Apply to all axes */
             for (int i = 0; i < NUM_AXES; i++) {
                 self->axes[i].range_min = pr->lMin;
                 self->axes[i].range_max = pr->lMax;
             }
-        } else if (hdr->dwHow == DIPH_BYOFFSET && hdr->dwObj / 4 < (DWORD)NUM_AXES) {
+        } else if (hdr->dwHow == DIPH_BYOFFSET && hdr->dwObj % 4 == 0 &&
+                   hdr->dwObj / 4 < (DWORD)NUM_AXES) {
             self->axes[hdr->dwObj / 4].range_min = pr->lMin;
             self->axes[hdr->dwObj / 4].range_max = pr->lMax;
+        } else {
+            return E_NOTIMPL_T;
         }
         return DI_OK;
     }
@@ -632,17 +672,22 @@ static HRESULT_T STDMETHODCALLTYPE xdev_SetProperty(XInputDevice* self, const MY
         const DIPROPDWORD* pd = (const DIPROPDWORD*)h;
         di_log("XInputDevice: SetProperty DIPROP_DEADZONE obj=%lu how=%lu val=%lu",
                hdr->dwObj, hdr->dwHow, pd->dwData);
+        if (hdr->dwSize != sizeof(DIPROPDWORD) || pd->dwData > 10000)
+            return DIERR_INVALIDPARAM;
         if (hdr->dwHow == DIPH_DEVICE) {
             for (int i = 0; i < NUM_AXES; i++)
                 self->axes[i].deadzone_pct = pd->dwData;
-        } else if (hdr->dwHow == DIPH_BYOFFSET && hdr->dwObj / 4 < (DWORD)NUM_AXES) {
+        } else if (hdr->dwHow == DIPH_BYOFFSET && hdr->dwObj % 4 == 0 &&
+                   hdr->dwObj / 4 < (DWORD)NUM_AXES) {
             self->axes[hdr->dwObj / 4].deadzone_pct = pd->dwData;
+        } else {
+            return E_NOTIMPL_T;
         }
         return DI_OK;
     }
 
     di_log("XInputDevice: SetProperty(prop=%lu)", IS_DIPROP(g) ? (unsigned long)(uintptr_t)g : 0);
-    return DI_OK;
+    return E_NOTIMPL_T;
 }
 
 static HRESULT_T STDMETHODCALLTYPE xdev_Acquire(XInputDevice* self) {
@@ -653,6 +698,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_Acquire(XInputDevice* self) {
 
 static HRESULT_T STDMETHODCALLTYPE xdev_Unacquire(XInputDevice* self) {
     di_log("XInputDevice: Unacquire");
+    release_synthetic_input(&self->synthetic);
     self->acquired = FALSE;
     return DI_OK;
 }
@@ -662,17 +708,24 @@ static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceState(XInputDevice* self, DWORD
     static int logged = 0;
     if (!logged) { di_log("XInputDevice: GetDeviceState(size=%lu) [first call]", cbData); logged = 1; }
     if (!lpvData) return DIERR_INVALIDPARAM;
-    if (!self->acquired) return DIERR_NOTACQUIRED;
+    if (!self->acquired) {
+        release_synthetic_input(&self->synthetic);
+        return DIERR_NOTACQUIRED;
+    }
+    memset(lpvData, 0, cbData);
 
     DIJOYSTATE js;
-    if (!xinput_read_joystate(self->user_index, self->axes, &js)) {
-        memset(lpvData, 0, cbData);
-        /* Return zeroed state with centered POVs */
-        if (cbData >= sizeof(DIJOYSTATE)) {
-            DIJOYSTATE* p = (DIJOYSTATE*)lpvData;
-            p->rgdwPOV[0] = p->rgdwPOV[1] = p->rgdwPOV[2] = p->rgdwPOV[3] = (DWORD)-1;
-        }
-        return DI_OK;
+    BOOL allow_injection = self->hwnd != NULL && GetForegroundWindow() == self->hwnd;
+    if (!xinput_read_joystate(self->user_index, self->axes, &self->synthetic,
+                              allow_injection, &js)) {
+        memset(&js, 0, sizeof(js));
+        js.lX = (self->axes[0].range_min + self->axes[0].range_max) / 2;
+        js.lY = (self->axes[1].range_min + self->axes[1].range_max) / 2;
+        js.lZ = (self->axes[2].range_min + self->axes[2].range_max) / 2;
+        js.lRx = (self->axes[3].range_min + self->axes[3].range_max) / 2;
+        js.lRy = (self->axes[4].range_min + self->axes[4].range_max) / 2;
+        js.lRz = (self->axes[5].range_min + self->axes[5].range_max) / 2;
+        js.rgdwPOV[0] = js.rgdwPOV[1] = js.rgdwPOV[2] = js.rgdwPOV[3] = (DWORD)-1;
     }
 
     DWORD copy = cbData < sizeof(js) ? cbData : sizeof(js);
@@ -689,7 +742,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceData(XInputDevice* s, DWORD a, 
 
 static HRESULT_T STDMETHODCALLTYPE xdev_SetDataFormat(XInputDevice* self, const DIDATAFORMAT* df) {
     if (!df) return DIERR_INVALIDPARAM;
-    self->data_size = df->dwDataSize;
+    (void)self;
     di_log("XInputDevice: SetDataFormat size=%lu", df->dwDataSize);
     return DI_OK;
 }
@@ -700,8 +753,9 @@ static HRESULT_T STDMETHODCALLTYPE xdev_SetEventNotification(XInputDevice* s, HA
 }
 
 static HRESULT_T STDMETHODCALLTYPE xdev_SetCooperativeLevel(XInputDevice* s, HWND hw, DWORD fl) {
-    (void)s; (void)hw; (void)fl;
+    s->hwnd = hw;
     di_log("XInputDevice: SetCooperativeLevel flags=0x%lx", fl);
+    (void)fl;
     return DI_OK;
 }
 
@@ -710,10 +764,27 @@ static HRESULT_T STDMETHODCALLTYPE xdev_GetObjectInfo(XInputDevice* s, void* a, 
     return DIERR_INVALIDPARAM;
 }
 
+static HRESULT_T fill_xinput_device_info(DIDEVICEINSTANCEA* info) {
+    if (!info) return DIERR_INVALIDPARAM;
+    DWORD size = info->dwSize;
+    DWORD dx3_size = (DWORD)offsetof(DIDEVICEINSTANCEA, guidFFDriver);
+    if (size != dx3_size && size != sizeof(DIDEVICEINSTANCEA)) {
+        return DIERR_INVALIDPARAM;
+    }
+    memset(info, 0, size);
+    info->dwSize = size;
+    memcpy(&info->guidInstance, &GUID_XInputPad, sizeof(MY_GUID));
+    memcpy(&info->guidProduct, &GUID_XInputPad, sizeof(MY_GUID));
+    info->dwDevType = DIDEVTYPE_JOYSTICK | (0x01 << 8);
+    strncpy(info->tszInstanceName, "Xbox Controller (XInput)", 259);
+    strncpy(info->tszProductName, "Xbox Controller", 259);
+    return DI_OK;
+}
+
 static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceInfo(XInputDevice* s, void* a) {
     di_log("XInputDevice: GetDeviceInfo");
-    (void)s; (void)a;
-    return DI_OK;
+    (void)s;
+    return fill_xinput_device_info((DIDEVICEINSTANCEA*)a);
 }
 
 static HRESULT_T STDMETHODCALLTYPE xdev_RunControlPanel(XInputDevice* s, HWND h, DWORD d) {
@@ -812,12 +883,11 @@ static XInputDevice* xinput_device_create(DWORD user_index) {
     dev->ref_count = 1;
     dev->user_index = user_index;
     dev->acquired = FALSE;
-    dev->data_size = sizeof(DIJOYSTATE);
     /* Default axis ranges — will be overridden by SetProperty(DIPROP_RANGE) */
     for (int i = 0; i < NUM_AXES; i++) {
         dev->axes[i].range_min = -1000;
         dev->axes[i].range_max = 1000;
-        dev->axes[i].deadzone_pct = 0;
+        dev->axes[i].deadzone_pct = (THUMB_DEADZONE * 10000UL) / 32767UL;
     }
     di_log("XInputDevice: created (user %lu)", user_index);
     return dev;
@@ -831,8 +901,8 @@ typedef struct WrappedDI WrappedDI;
 struct WrappedDI {
     void** vtbl;       /* our custom vtable */
     LONG ref_count;
-    void* real_di;     /* real IDirectInput7A pointer */
-    void** real_vtbl;  /* real vtable (read through real_di) */
+    void* real_di;     /* real DirectInput interface pointer */
+    DWORD interface_level;
 };
 
 /* Helper: call real vtable method */
@@ -840,15 +910,43 @@ struct WrappedDI {
 
 /* ── Wrapped IDirectInput methods ─────────────────────────────────── */
 
+static DWORD directinput_iid_level(const MY_IID* riid) {
+    if (guid_eq(riid, &IID_IDirectInputA)) return 1;
+    if (guid_eq(riid, &IID_IDirectInput2A)) return 2;
+    if (guid_eq(riid, &IID_IDirectInput7A)) return 7;
+    return 0;
+}
+
 static HRESULT_T STDMETHODCALLTYPE wdi_QueryInterface(WrappedDI* self, const MY_IID* riid, void** ppv) {
-    if (!ppv) return (HRESULT_T)0x80000003L;
-    /* Return ourselves for any DInput IID */
-    if (guid_eq(riid, &MY_IID_IUnknown) || guid_eq(riid, &IID_IDirectInputA) ||
-        guid_eq(riid, &IID_IDirectInput2A) || guid_eq(riid, &IID_IDirectInput7A)) {
+    if (!ppv || !riid) return E_POINTER_T;
+    *ppv = NULL;
+    DWORD requested_level = directinput_iid_level(riid);
+    if (guid_eq(riid, &MY_IID_IUnknown) ||
+        (requested_level != 0 && requested_level <= self->interface_level)) {
         *ppv = self;
-        self->ref_count++;
+        InterlockedIncrement(&self->ref_count);
         return DI_OK;
     }
+
+    if (requested_level != 0) {
+        typedef HRESULT_T (STDMETHODCALLTYPE* FnQI)(void*, const MY_IID*, void**);
+        void* upgraded = NULL;
+        HRESULT_T hr = ((FnQI)REAL_VTBL(self)[DI_VTBL_QI])(self->real_di, riid,
+                                                           &upgraded);
+        if (hr != DI_OK) return hr;
+        if (!upgraded) return DIERR_NOINTERFACE;
+
+        void* old_real = self->real_di;
+        self->real_di = upgraded;
+        self->interface_level = requested_level;
+        typedef ULONG (STDMETHODCALLTYPE* FnRelease)(void*);
+        ((FnRelease)(*(void***)old_real)[DI_VTBL_RELEASE])(old_real);
+
+        *ppv = self;
+        InterlockedIncrement(&self->ref_count);
+        return DI_OK;
+    }
+
     /* Forward unknown IIDs */
     typedef HRESULT_T (STDMETHODCALLTYPE* FnQI)(void*, const MY_IID*, void**);
     return ((FnQI)REAL_VTBL(self)[DI_VTBL_QI])(self->real_di, riid, ppv);
@@ -899,6 +997,7 @@ static HRESULT_T STDMETHODCALLTYPE wdi_EnumDevices(WrappedDI* self, DWORD devTyp
     /* For joystick enumeration: inject our XInput device FIRST so it gets slot 0,
        then skip real DI7 joystick enumeration (legacy DInput Xbox driver is broken
        on modern Windows and would steal the slot). */
+    BOOL injected = FALSE;
     if (devType == DIDEVTYPE_JOYSTICK || devType == 0) {
         if (g_XInputGetState && !(dwFlags & DIEDFL_FORCEFEEDBACK)) {
             XINPUT_STATE xs;
@@ -907,15 +1006,12 @@ static HRESULT_T STDMETHODCALLTYPE wdi_EnumDevices(WrappedDI* self, DWORD devTyp
                 DIDEVICEINSTANCEA di;
                 memset(&di, 0, sizeof(di));
                 di.dwSize = sizeof(di);
-                memcpy(&di.guidInstance, &GUID_XInputPad, sizeof(MY_GUID));
-                memcpy(&di.guidProduct, &GUID_XInputPad, sizeof(MY_GUID));
-                di.dwDevType = DIDEVTYPE_JOYSTICK | (0x01 << 8);
-                strncpy(di.tszInstanceName, "Xbox Controller (XInput)", 259);
-                strncpy(di.tszProductName, "Xbox Controller", 259);
+                fill_xinput_device_info(&di);
                 if (callback(&di, pvRef) == DIENUM_STOP) {
                     di_log("EnumDevices: callback returned STOP after XInput injection");
                     return DI_OK;
                 }
+                injected = TRUE;
             }
         } else if (dwFlags & DIEDFL_FORCEFEEDBACK) {
             di_log("EnumDevices: skipping XInput pad (FF-only filter)");
@@ -923,7 +1019,7 @@ static HRESULT_T STDMETHODCALLTYPE wdi_EnumDevices(WrappedDI* self, DWORD devTyp
 
         /* For joystick-only queries, skip real DI7 enumeration entirely —
            the legacy DInput driver for Xbox controllers is broken on Win11 */
-        if (devType == DIDEVTYPE_JOYSTICK) {
+        if (devType == DIDEVTYPE_JOYSTICK && injected) {
             return DI_OK;
         }
     }
@@ -961,6 +1057,13 @@ static HRESULT_T STDMETHODCALLTYPE wdi_CreateDeviceEx(WrappedDI* self, const MY_
                                                         const MY_IID* riid, void** ppvObj,
                                                         void* pUnkOuter) {
     if (rguid && guid_eq(rguid, &GUID_XInputPad)) {
+        if (!riid || !ppvObj) return DIERR_INVALIDPARAM;
+        *ppvObj = NULL;
+        if (!guid_eq(riid, &IID_IDirectInputDeviceA) &&
+            !guid_eq(riid, &IID_IDirectInputDevice2A) &&
+            !guid_eq(riid, &IID_IDirectInputDevice7A)) {
+            return DIERR_NOINTERFACE;
+        }
         return wdi_CreateDevice(self, rguid, ppvObj, pUnkOuter);
     }
     typedef HRESULT_T (STDMETHODCALLTYPE* Fn)(void*, const MY_GUID*, const MY_IID*, void**, void*);
@@ -969,7 +1072,7 @@ static HRESULT_T STDMETHODCALLTYPE wdi_CreateDeviceEx(WrappedDI* self, const MY_
 
 /* ── Create the wrapped IDirectInput7A ────────────────────────────── */
 
-static WrappedDI* wrap_directinput(void* real_di) {
+static WrappedDI* wrap_directinput(void* real_di, DWORD interface_level) {
     WrappedDI* w = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(WrappedDI));
     if (!w) return NULL;
 
@@ -990,7 +1093,7 @@ static WrappedDI* wrap_directinput(void* real_di) {
     w->vtbl = vtbl;
     w->ref_count = 1;
     w->real_di = real_di;
-    w->real_vtbl = *(void***)real_di;
+    w->interface_level = interface_level;
 
     di_log("WrappedDI: created (real=%p)", real_di);
     return w;
@@ -1000,19 +1103,21 @@ static WrappedDI* wrap_directinput(void* real_di) {
  * DLL initialization + exports
  * ══════════════════════════════════════════════════════════════════════ */
 
+static HMODULE load_system_library(const WCHAR* name) {
+    WCHAR path[MAX_PATH];
+    UINT len = GetSystemDirectoryW(path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return NULL;
+    if (wcscat_s(path, MAX_PATH, L"\\") != 0 ||
+        wcscat_s(path, MAX_PATH, name) != 0) {
+        return NULL;
+    }
+    return LoadLibraryW(path);
+}
+
 static BOOL load_real_dinput(void) {
     if (g_real_dinput) return TRUE;
 
-    WCHAR path[MAX_PATH];
-    int len = GetSystemWindowsDirectoryW(path, MAX_PATH);
-    if (len <= 0) return FALSE;
-    wcscat(path, L"\\SysWOW64\\dinput.dll");
-    g_real_dinput = LoadLibraryW(path);
-
-    if (!g_real_dinput) {
-        wcscpy(path, L"C:\\Windows\\System32\\dinput.dll");
-        g_real_dinput = LoadLibraryW(path);
-    }
+    g_real_dinput = load_system_library(L"dinput.dll");
     if (!g_real_dinput) return FALSE;
 
     g_real_DirectInputCreateA = (PFN_DirectInputCreateA)GetProcAddress(g_real_dinput, "DirectInputCreateA");
@@ -1025,9 +1130,9 @@ static BOOL load_real_dinput(void) {
 
 static void load_xinput(void) {
     if (g_xinput) return;
-    g_xinput = LoadLibraryA("xinput1_4.dll");
-    if (!g_xinput) g_xinput = LoadLibraryA("xinput1_3.dll");
-    if (!g_xinput) g_xinput = LoadLibraryA("xinput9_1_0.dll");
+    g_xinput = load_system_library(L"xinput1_4.dll");
+    if (!g_xinput) g_xinput = load_system_library(L"xinput1_3.dll");
+    if (!g_xinput) g_xinput = load_system_library(L"xinput9_1_0.dll");
     if (g_xinput) {
         g_XInputGetState = (PFN_XInputGetState)GetProcAddress(g_xinput, "XInputGetState");
         di_log("XInput loaded (%p), GetState=%p", (void*)g_xinput, (void*)g_XInputGetState);
@@ -1041,7 +1146,10 @@ static void load_xinput(void) {
 __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateA(HINSTANCE hinst, DWORD version,
                                                            void** ppDI, void* pUnkOuter) {
     di_log("DirectInputCreateA(version=0x%lx)", version);
+    if (!ppDI) return DIERR_INVALIDPARAM;
+    *ppDI = NULL;
     if (!load_real_dinput()) return DIERR_NOTINITIALIZED;
+    load_xinput();
 
     void* real_di = NULL;
     HRESULT_T hr = g_real_DirectInputCreateA(hinst, version, &real_di, pUnkOuter);
@@ -1050,7 +1158,7 @@ __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateA(HINSTANCE hinst, DWORD
         return hr;
     }
 
-    WrappedDI* wrapped = wrap_directinput(real_di);
+    WrappedDI* wrapped = wrap_directinput(real_di, 1);
     if (!wrapped) {
         *ppDI = real_di;
     } else {
@@ -1062,6 +1170,7 @@ __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateA(HINSTANCE hinst, DWORD
 __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateW(HINSTANCE hinst, DWORD version,
                                                            void** ppDI, void* pUnkOuter) {
     di_log("DirectInputCreateW(version=0x%lx)", version);
+    if (!ppDI) return DIERR_INVALIDPARAM;
     if (!load_real_dinput()) return DIERR_NOTINITIALIZED;
     if (!g_real_DirectInputCreateW) return DIERR_NOTINITIALIZED;
     /* Don't wrap W version — game uses A only */
@@ -1072,14 +1181,20 @@ __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateEx(HINSTANCE hinst, DWOR
                                                             const MY_IID* riid, void** ppvOut,
                                                             void* pUnkOuter) {
     di_log("DirectInputCreateEx(version=0x%lx)", version);
+    if (!riid || !ppvOut) return DIERR_INVALIDPARAM;
+    *ppvOut = NULL;
     if (!load_real_dinput()) return DIERR_NOTINITIALIZED;
     if (!g_real_DirectInputCreateEx) return DIERR_NOTINITIALIZED;
+    load_xinput();
 
     void* real_di = NULL;
     HRESULT_T hr = g_real_DirectInputCreateEx(hinst, version, riid, &real_di, pUnkOuter);
     if (hr != DI_OK || !real_di) return hr;
 
-    WrappedDI* wrapped = wrap_directinput(real_di);
+    DWORD interface_level = guid_eq(riid, &IID_IDirectInput7A) ? 7 :
+                            guid_eq(riid, &IID_IDirectInput2A) ? 2 :
+                            guid_eq(riid, &IID_IDirectInputA) ? 1 : 0;
+    WrappedDI* wrapped = interface_level ? wrap_directinput(real_di, interface_level) : NULL;
     if (!wrapped) {
         *ppvOut = real_di;
     } else {
@@ -1102,14 +1217,65 @@ BOOL APIENTRY DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(instance);
-        di_log_init();
-        di_log("=== dinput proxy DLL loaded (PID %lu) ===", GetCurrentProcessId());
-        load_xinput();
-    } else if (reason == DLL_PROCESS_DETACH) {
-        di_log("=== dinput proxy DLL unloading ===");
-        di_log_close();
-        if (g_real_dinput) { FreeLibrary(g_real_dinput); g_real_dinput = NULL; }
-        if (g_xinput) { FreeLibrary(g_xinput); g_xinput = NULL; }
     }
     return TRUE;
 }
+
+#ifdef DINPUT_LOGIC_TEST
+static int test_check(BOOL condition, const char* message) {
+    if (condition) return 0;
+    fprintf(stderr, "dinput logic test failed: %s\n", message);
+    return 1;
+}
+
+int main(void) {
+    int failed = 0;
+    AxisConfig axis = {-1000, 1000, 2500};
+    failed += test_check(configured_deadzone(&axis) == 8191,
+                         "DIPROP_DEADZONE converts to XInput units");
+    failed += test_check(scale_axis(-32768, -1000, 1000) == -1000,
+                         "negative axis scaling clamps to configured minimum");
+    failed += test_check(scale_axis(-(LONG)apply_deadzone((SHORT)-32768, THUMB_DEADZONE),
+                                    -1000, 1000) == 1000,
+                         "full-down stick maps to the positive Y endpoint");
+
+    XInputDevice device;
+    memset(&device, 0, sizeof(device));
+    DIPROPDWORD deadzone = {
+        {sizeof(DIPROPDWORD), sizeof(DIPROPHEADER), 0, DIPH_DEVICE}, 2500
+    };
+    failed += test_check(xdev_SetProperty(&device, DIPROP_DEADZONE, &deadzone) == DI_OK &&
+                             configured_deadzone(&device.axes[0]) == 8191,
+                         "SetProperty applies device deadzone to every axis");
+    DIDEVCAPS caps;
+    memset(&caps, 0xA5, sizeof(caps));
+    caps.dwSize = sizeof(caps);
+    failed += test_check(xdev_GetCapabilities(&device, &caps) == DI_OK,
+                         "full DIDEVCAPS is accepted");
+    failed += test_check(caps.dwSize == sizeof(caps) && caps.dwAxes == 6 &&
+                             caps.dwButtons == 10 && caps.dwPOVs == 1,
+                         "GetCapabilities preserves size and fills capabilities");
+    caps.dwSize = sizeof(DWORD);
+    failed += test_check(xdev_GetCapabilities(&device, &caps) == DIERR_INVALIDPARAM,
+                         "invalid DIDEVCAPS size is rejected");
+
+    DIDEVICEINSTANCEA info;
+    memset(&info, 0, sizeof(info));
+    info.dwSize = sizeof(info);
+    failed += test_check(fill_xinput_device_info(&info) == DI_OK,
+                         "full DIDEVICEINSTANCE is accepted");
+    failed += test_check(strcmp(info.tszProductName, "Xbox Controller") == 0,
+                         "GetDeviceInfo fills the product name");
+
+    MY_GUID unsupported = {0x12345678, 0, 0, {0}};
+    void* queried = &device;
+    failed += test_check(xdev_QueryInterface(&device, &unsupported, &queried) ==
+                             DIERR_NOINTERFACE && queried == NULL,
+                         "unsupported device interfaces are rejected");
+
+    if (failed == 0) {
+        puts("dinput logic tests passed");
+    }
+    return failed != 0;
+}
+#endif

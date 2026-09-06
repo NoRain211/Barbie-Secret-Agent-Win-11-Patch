@@ -36,6 +36,7 @@ The game was built for Windows 95/98 using DirectX 7 (DirectDraw + Direct3D 7). 
 | 16bpp display modes | "Not implemented" error | Coerce 16bpp requests to 32bpp |
 | D3D7 surface memory flags | CreateSurface fails | Strip SYSTEMMEMORY from primary, force on Z-buffer (non-dgVoodoo path) |
 | DDraw/D3D7 rendering | Black screen, pixel format issues | Chain through dgVoodoo2 for DDraw/D3D7 to D3D11 translation |
+| Fixed 640x480 rendering | Stretched or pillarboxed 4:3 output | Patch native resolution, aspect ratio, and both camera FOV paths |
 
 ## Architecture
 
@@ -49,6 +50,9 @@ SecretAgent.exe
     |   |
     |   +-- IAT hooks: GetDriveTypeA, GetVolumeInformationA
     |   |   (bypasses CD-ROM check)
+    |   |
+    |   +-- Native widescreen patch
+    |   |   (resolution, aspect ratio, and Hor+ camera FOV)
     |   |
     |   +-- Loads "dgVoodoo_ddraw.dll" (dgVoodoo2, renamed)
     |   |   (DDraw/D3D7 -> D3D11 rendering translation)
@@ -66,6 +70,7 @@ SecretAgent.exe
 - Audio (voices, music, sound effects)
 - Keyboard and mouse controls
 - Alt+Tab recovery
+- Native widescreen rendering with corrected Hor+ camera FOV
 - Native gamepad support through the DirectInput/XInput shim
 - Full game completion from start to finish
 - No admin rights required
@@ -77,6 +82,7 @@ Requires TDM-GCC or MinGW with 32-bit support:
 ```bash
 cd shim-dll
 mingw32-make clean all
+mingw32-make test
 ```
 
 The default Makefile build enables `SHIM_DEBUG` so release DLLs write
@@ -100,12 +106,14 @@ barbie-secret-agent-re/
 |   +-- src/
 |   |   +-- main.c        # DllMain, export forwarders, registry + CD-ROM hooks
 |   |   +-- ddraw_proxy.c # IDirectDraw7 COM proxy wrapper
+|   |   +-- widescreen_fix.c # Native resolution/aspect/FOV patch
+|   |   +-- dinput_main.c # DirectInput/XInput controller bridge
 |   +-- include/
 |   |   +-- vtable_offsets.h  # DDraw/D3D vtable constants
 |   |   +-- shim_log.h       # Logging utilities
-|   +-- ddraw.def         # DLL export definitions
-|   +-- build/            # Compiled output
-+-- GhidrAssistMCP/       # Ghidra MCP tools (for RE work)
+|   +-- tests/            # Native shim regression probes
+|   +-- ddraw.def         # DDraw export definitions
++-- launcher/             # Go/WebView2 settings launcher
 +-- README.md             # This file
 +-- TECHNICAL.md          # Deep technical documentation
 +-- REVERSING.md          # Reverse engineering findings
@@ -116,11 +124,19 @@ barbie-secret-agent-re/
 Double-click `Secret Agent Barbie Launcher.exe` in the game folder for a settings menu:
 
 - **Resolution** — Original, 1024x768, 1080p, 1440p, or native max
-- **Aspect Ratio** — 4:3 pillarbox (recommended), stretch to fill, auto AR
+- **Aspect Ratio** — native aspect ratio (recommended), 4:3 pillarbox, stretch, or centered
+- **Gameplay FOV multiplier** — optional adjustment on top of corrected Hor+ FOV
 - **Display Mode** — Fullscreen or windowed
-- **Watermark** — Toggle dgVoodoo2 watermark
 
-Settings are saved to `dgVoodoo.conf` before launching.
+Settings are saved to `dgVoodoo.conf` and
+`SecretAgentBarbieWidescreenFix.ini` before launching. A missing widescreen INI
+defaults to the current desktop resolution and a 1.0 gameplay FOV multiplier.
+
+The 3D game and camera render natively at the selected aspect ratio. Menus use
+proportional scaling, while the action bar and radar stay anchored to the screen
+edges. Camera/hook backgrounds and the post-intro splash fill the screen.
+Cutscene letterboxing may differ outside 4:3. See the validation limits in
+[RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## Gamepad Support
 
@@ -154,3 +170,7 @@ Reverse engineered and patched by a multi-agent team:
 - **Kilo** — Toolchain research, compatibility testing, MCI analysis
 
 Built using [AgentChattr](https://github.com/bcurts/agentchattr) for multi-agent coordination, [GhidrAssistMCP](https://github.com/symgraph/GhidrAssistMCP) for Ghidra integration, and [dgVoodoo2](https://github.com/dege-diosg/dgVoodoo2) for rendering translation.
+
+Native widescreen patch signatures and behavior are based on AlphaYellow's
+[SecretAgentBarbieWidescreenFix](https://github.com/alphayellow1/AlphaYellowWidescreenFixes)
+under the MIT License. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

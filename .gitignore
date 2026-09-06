@@ -1,5 +1,6 @@
 # Original game files and local test installs
 game-files/
+work/
 *.pak
 *.avi
 Saves/

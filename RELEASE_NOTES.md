@@ -1,3 +1,33 @@
+# v1.2.0
+
+Native widescreen rendering, proportional UI, and cursor fixes.
+
+- Added native widescreen and ultrawide rendering to the existing `ddraw.dll`.
+  The shim now patches the game's framebuffer resolution, aspect-ratio values,
+  and both camera FOV paths after validating the executable's byte signatures.
+- Added launcher control for the native resolution and gameplay FOV multiplier.
+- Added a regression probe for the supported SecretAgent.exe v1.0.0.1 binary.
+- Scaled menus and outfit-selection UI while retaining original proportions;
+  anchored the action bar and radar to the screen edges.
+- Expanded camera and hook overlay backgrounds to fill the screen.
+- Fixed cursor bounds, duplicate cursor drawing, and exit-dialog hit testing.
+- Changed the post-intro splash to use the engine's full-screen bitmap draw.
+- Hardened launcher settings validation, error reporting, and shim startup.
+
+## Install
+
+Extract the patch into a writable game folder beside `SecretAgent.exe`.
+Use the launcher to choose a resolution and FOV multiplier. Native desktop
+resolution is the default. No original game files or extracted art are included.
+
+## Validation
+
+Shim regression probes and launcher tests cover the release changes. Main-menu
+Exit was confirmed in game by the user. The final splash adjustment has passed
+the binary-patch regression checks but still needs visual confirmation;
+complete outfit/camera/hook and ultrawide playthrough validation is pending.
+Cutscene letterboxing may differ outside 4:3.
+
 # v1.1.0
 
 Maintenance release for startup diagnostics and supportability.

@@ -119,8 +119,8 @@ HKLM\SOFTWARE\Gigawatt Studios\SecretAgent\1.0\
 | `PATH` | REG_SZ | Install path | `C:\game-files\` |
 | `SETUP` | REG_DWORD | Install state | `3` |
 | `LANGUAGE` | REG_SZ | Language code | `ENG` |
-| `Publisher` | REG_SZ | Publisher name | `Vivendi Universal Games` |
-| `VERSION` | REG_SZ | Version string | `1.0` |
+| `Publisher` | REG_SZ | Publisher name | `Gigawatt Studios` |
+| `VERSION` | REG_SZ | Version string | `1.00.00` |
 
 ### Registry Access Function
 
@@ -180,6 +180,23 @@ void FUN_004f81da(void** start, void** end) {
     }
 }
 ```
+
+## Native Widescreen Patch Sites
+
+The supported v1.0.0.1 executable (SHA-256
+`69198FB1437C973483CF6682D765B247E384F59E15730C0F6BC377A31D616721`)
+has unique signatures at these RVAs:
+
+| Group | RVAs |
+|---|---|
+| Resolution | `0x2678a`, `0x27953`, `0x71c21`, `0xc4338`, `0xc439e`, `0xe0277`, `0xe0e98`, `0xf47bd` |
+| Aspect ratio | `0x3ee8`, `0xc45a`, `0x23f64` |
+| Camera FOV | `0x3e180` (overall), `0x2883a` (gameplay) |
+
+The original executable is not marked dynamic-base, but the patch still uses
+mapped-module-relative addresses so Windows Mandatory ASLR does not invalidate
+the sites. The overall FOV hook replaces ten bytes and replays the displaced
+x87 multiply; the gameplay hook replaces the six-byte `fld [ecx+0xb0]`.
 
 ## Display Mode Enumeration
 

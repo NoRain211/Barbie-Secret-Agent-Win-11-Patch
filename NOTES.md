@@ -3,7 +3,7 @@
 Ideas, potential improvements, and research topics that came up during the project.
 
 ## Current Status
-- Windows 10/11 compatibility patch is released as v1.0.0
+- Windows 10/11 compatibility patch is released as v1.1.0
 - Game is verified playable from start to finish
 - Drop-in release includes `ddraw.dll`, `dinput.dll`, dgVoodoo2 runtime files, `dgVoodoo.conf`, and the launcher
 - GitHub repository intentionally excludes original game files, executables, `.pak` archives, videos, saves, and local test artifacts
@@ -17,10 +17,9 @@ Ideas, potential improvements, and research topics that came up during the proje
 - 3D textures also low-res but dgVoodoo2 already renders geometry at higher res
 
 ## Launcher
-- Current launcher is a standalone Go/Fyne `.exe`
+- Current launcher is a standalone Go/WebView2 `.exe`
 - It edits `dgVoodoo.conf` before launching `SecretAgent.exe`
 - Remaining polish: icon embedding, title/cover art, and clearer install-time placement checks
-- Longer-term option: replace Fyne UI with an embedded webview if richer styling becomes worth the dependency
 
 ## Save File Format
 - `Save.dat` uses Gigawatt `GWFB` binary format

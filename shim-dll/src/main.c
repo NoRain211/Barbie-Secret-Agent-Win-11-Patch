@@ -5,6 +5,9 @@
 
 #include "shim_log.h"
 
+FILE* g_log_file = NULL;
+bool g_log_suspended = false;
+
 static HMODULE g_real_ddraw = NULL;
 static HMODULE g_advapi = NULL;
 static bool g_exports_ready = false;
@@ -73,7 +76,7 @@ DDRAWSYM(ReleaseDDThreadLock);
 DDRAWSYM(SetAppCompatData);
 
 static const char kSecretAgentKeyPrefix[] = "SOFTWARE\\Gigawatt Studios\\";
-static LONG g_fake_handle_counter = 0xDEAD0001;
+static LONG g_fake_handle_counter = 0;
 static char g_secretagent_cdrom[MAX_PATH] = ".\\";
 static char g_secretagent_path[MAX_PATH] = ".\\";
 static const char kSecretAgentLanguage[] = "ENG";
@@ -84,18 +87,18 @@ static bool cache_export(const char* name, FARPROC* proc);
 static bool cache_reg_export(const char* name, FARPROC* proc);
 static bool resolve_real_ddraw(void);
 static bool resolve_real_advapi(void);
-static bool ensure_exports_loaded(void);
+__attribute__((used, noinline)) bool ensure_exports_loaded(void);
 static bool ensure_registry_hooks_loaded(void);
 static bool is_secretagent_reg_key(const char* sub_key);
-static void store_redirected_key(HKEY key);
+static bool store_redirected_key(HKEY key);
 static bool is_redirected_key(HKEY key);
 static bool clear_redirected_key(HKEY key);
-static void unregister_redirected_keys(void);
+static bool is_fake_registry_handle(HKEY key);
+static HKEY allocate_fake_registry_handle(void);
 static bool query_secretagent_default_value(const char* value_name, LPBYTE data,
                                           LPDWORD data_len);
 static bool is_fake_cdrom_path(const char* path);
 static bool patch_iat_for_hooks(HMODULE module);
-static void uninstall_registry_hooks(void);
 static void init_runtime_paths(void);
 static UINT WINAPI shim_GetDriveTypeA(LPCSTR lpRootPathName);
 static BOOL WINAPI shim_GetVolumeInformationA(LPCSTR lpRootPathName, LPSTR lpVolumeNameBuffer,
@@ -169,22 +172,18 @@ static bool resolve_real_ddraw(void) {
     }
   }
 
-  path_len = GetSystemWindowsDirectoryW(dll_path, MAX_PATH);
-  if (path_len <= 0 || (int)wcslen(dll_path) + 20 >= MAX_PATH) {
+  path_len = GetSystemDirectoryW(dll_path, MAX_PATH);
+  if (path_len <= 0 || path_len >= MAX_PATH) {
     return false;
   }
 
-  if (wcscat_s(dll_path, MAX_PATH, L"\\SysWOW64\\ddraw.dll") != 0) {
+  if (wcscat_s(dll_path, MAX_PATH, L"\\ddraw.dll") != 0) {
     return false;
   }
 
   g_real_ddraw = LoadLibraryW(dll_path);
   if (g_real_ddraw == NULL) {
-    wcscpy(dll_path, L"C:\\Windows\\System32\\ddraw.dll");
-    g_real_ddraw = LoadLibraryW(dll_path);
-    if (g_real_ddraw == NULL) {
-      return false;
-    }
+    return false;
   }
 
   return true;
@@ -195,7 +194,7 @@ static bool resolve_real_advapi(void) {
     return true;
   }
 
-  g_advapi = LoadLibraryW(L"advapi32.dll");
+  g_advapi = GetModuleHandleW(L"advapi32.dll");
   return g_advapi != NULL;
 }
 
@@ -207,14 +206,15 @@ static bool is_secretagent_reg_key(const char* sub_key) {
                    sizeof(kSecretAgentKeyPrefix) - 1) == 0;
 }
 
-static void store_redirected_key(HKEY key) {
+static bool store_redirected_key(HKEY key) {
   for (int i = 0; i < MAX_REDIRECTED_KEYS; ++i) {
     if (!g_redirected_keys[i].is_redirected) {
       g_redirected_keys[i].key = key;
       g_redirected_keys[i].is_redirected = true;
-      break;
+      return true;
     }
   }
+  return false;
 }
 
 static bool is_redirected_key(HKEY key) {
@@ -237,11 +237,23 @@ static bool clear_redirected_key(HKEY key) {
   return false;
 }
 
-static void unregister_redirected_keys(void) {
-  for (int i = 0; i < MAX_REDIRECTED_KEYS; ++i) {
-    g_redirected_keys[i].is_redirected = false;
-    g_redirected_keys[i].key = NULL;
+static bool is_fake_registry_handle(HKEY key) {
+  uintptr_t value = (uintptr_t)key;
+  return value >= 0xDEAD0000 && value <= 0xDEAD00FF;
+}
+
+static HKEY allocate_fake_registry_handle(void) {
+  for (int i = 0; i < 255; ++i) {
+    uintptr_t suffix = (uintptr_t)InterlockedIncrement(&g_fake_handle_counter) & 0xFF;
+    if (suffix == 0) {
+      continue;
+    }
+    HKEY candidate = (HKEY)(uintptr_t)(0xDEAD0000 | suffix);
+    if (!is_redirected_key(candidate)) {
+      return candidate;
+    }
   }
+  return NULL;
 }
 
 static bool query_secretagent_default_value(const char* value_name, LPBYTE data,
@@ -312,21 +324,32 @@ static LONG WINAPI hooked_RegOpenKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD ulOpti
     LONG status = g_fn_RegOpenKeyExA(HKEY_CURRENT_USER, lpSubKey, ulOptions, samDesired,
                                     phkResult);
     if (status == ERROR_SUCCESS) {
-      store_redirected_key(*phkResult);
+      if (!store_redirected_key(*phkResult)) {
+        g_fn_RegCloseKey(*phkResult);
+        *phkResult = NULL;
+        return ERROR_TOO_MANY_OPEN_FILES;
+      }
       shim_log("RegOpenKeyExA: HKCU key found, redirected (handle=%p)", (void*)*phkResult);
       return status;
     }
     /* Try real HKLM */
     status = g_fn_RegOpenKeyExA(HKEY_LOCAL_MACHINE, lpSubKey, ulOptions, samDesired, phkResult);
     if (status == ERROR_SUCCESS) {
-      store_redirected_key(*phkResult);
+      if (!store_redirected_key(*phkResult)) {
+        g_fn_RegCloseKey(*phkResult);
+        *phkResult = NULL;
+        return ERROR_TOO_MANY_OPEN_FILES;
+      }
       shim_log("RegOpenKeyExA: HKLM key found, overriding known values (handle=%p)",
                (void*)*phkResult);
       return status;
     }
     /* Both failed — return a fake handle so query hook can serve defaults */
-    *phkResult = (HKEY)(uintptr_t)(g_fake_handle_counter++);
-    store_redirected_key(*phkResult);
+    *phkResult = allocate_fake_registry_handle();
+    if (*phkResult == NULL || !store_redirected_key(*phkResult)) {
+      *phkResult = NULL;
+      return ERROR_TOO_MANY_OPEN_FILES;
+    }
     shim_log("RegOpenKeyExA: HKCU+HKLM both failed, using fake handle %p for defaults", (void*)*phkResult);
     return ERROR_SUCCESS;
   }
@@ -359,6 +382,9 @@ static LONG WINAPI hooked_RegQueryValueExA(HKEY hKey, LPCSTR lpValueName,
     if (GetLastError() == ERROR_MORE_DATA) {
       return ERROR_MORE_DATA;
     }
+    if (is_fake_registry_handle(hKey)) {
+      return ERROR_FILE_NOT_FOUND;
+    }
   }
 
   return g_fn_RegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
@@ -370,7 +396,7 @@ static LONG WINAPI hooked_RegCloseKey(HKEY hKey) {
   }
   if (clear_redirected_key(hKey)) {
     /* If it was a fake handle, don't pass to real RegCloseKey */
-    if ((uintptr_t)hKey >= 0xDEAD0000 && (uintptr_t)hKey <= 0xDEAD00FF) {
+    if (is_fake_registry_handle(hKey)) {
       shim_log("RegCloseKey: closing fake handle %p", (void*)hKey);
       return ERROR_SUCCESS;
     }
@@ -499,20 +525,14 @@ static bool ensure_registry_hooks_loaded(void) {
     return false;
   }
 
-  patch_iat_for_hooks(GetModuleHandleA(NULL));
+  if (!patch_iat_for_hooks(GetModuleHandleA(NULL))) {
+    return false;
+  }
   g_registry_hooks_ready = true;
   return true;
 }
 
-static void uninstall_registry_hooks(void) {
-  if (!g_registry_hooks_ready) {
-    return;
-  }
-  unregister_redirected_keys();
-  g_registry_hooks_ready = false;
-}
-
-static bool ensure_exports_loaded(void) {
+__attribute__((used, noinline)) bool ensure_exports_loaded(void) {
   if (g_exports_ready) {
     return true;
   }
@@ -553,44 +573,10 @@ static bool ensure_exports_loaded(void) {
   return true;
 }
 
-static void unload_real_ddraw(void) {
-  if (g_real_ddraw != NULL) {
-    FreeLibrary(g_real_ddraw);
-    g_real_ddraw = NULL;
-  }
-  g_exports_ready = false;
-  g_fn_AcquireDDThreadLock = NULL;
-  g_fn_CompleteCreateSysmemSurface = NULL;
-  g_fn_D3DParseUnknownCommand = NULL;
-  g_fn_DDGetAttachedSurfaceLcl = NULL;
-  g_fn_DDInternalLock = NULL;
-  g_fn_DDInternalUnlock = NULL;
-  g_fn_DSoundHelp = NULL;
-  g_fn_DirectDrawCreate = NULL;
-  g_fn_DirectDrawCreateClipper = NULL;
-  g_fn_DirectDrawCreateEx = NULL;
-  g_fn_DirectDrawEnumerateA = NULL;
-  g_fn_DirectDrawEnumerateExA = NULL;
-  g_fn_DirectDrawEnumerateExW = NULL;
-  g_fn_DirectDrawEnumerateW = NULL;
-  g_fn_DllCanUnloadNow = NULL;
-  g_fn_DllGetClassObject = NULL;
-  g_fn_GetDDSurfaceLocal = NULL;
-  g_fn_GetOLEThunkData = NULL;
-  g_fn_GetSurfaceFromDC = NULL;
-  g_fn_RegisterSpecialCase = NULL;
-  g_fn_ReleaseDDThreadLock = NULL;
-  g_fn_SetAppCompatData = NULL;
-}
-
-static void unload_real_advapi(void) {
-  if (g_advapi != NULL) {
-    FreeLibrary(g_advapi);
-    g_advapi = NULL;
-  }
-  g_fn_RegOpenKeyExA = NULL;
-  g_fn_RegQueryValueExA = NULL;
-  g_fn_RegCloseKey = NULL;
+__attribute__((used, noinline, noreturn)) void ddraw_forwarder_failure(void) {
+  shim_log("ddraw forwarder: required backend export is unavailable");
+  ExitProcess(ERROR_PROC_NOT_FOUND);
+  __builtin_unreachable();
 }
 
 #define DDRAW_FORWARDER(name) \
@@ -598,9 +584,16 @@ static void unload_real_advapi(void) {
     __asm__ __volatile__( \
       "movl _g_fn_" #name ", %%eax\n\t" \
       "testl %%eax, %%eax\n\t" \
+      "jnz 2f\n\t" \
+      "pushal\n\t" \
+      "call _ensure_exports_loaded\n\t" \
+      "popal\n\t" \
+      "movl _g_fn_" #name ", %%eax\n\t" \
+      "testl %%eax, %%eax\n\t" \
       "jz 1f\n\t" \
+      "2:\n\t" \
       "jmp *%%eax\n\t" \
-      "1: ret\n\t" \
+      "1: call _ddraw_forwarder_failure\n\t" \
       ::: "eax" \
     ); \
   }
@@ -627,38 +620,16 @@ DDRAW_FORWARDER(SetAppCompatData)
 
 __declspec(dllexport) HRESULT WINAPI DllCanUnloadNow(void) {
   typedef HRESULT (WINAPI *Fn)(void);
+  ensure_exports_loaded();
   Fn fn = (Fn)g_fn_DllCanUnloadNow;
   return fn ? fn() : S_OK;
 }
 
 __declspec(dllexport) HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv) {
   typedef HRESULT (WINAPI *Fn)(REFCLSID, REFIID, LPVOID*);
+  ensure_exports_loaded();
   Fn fn = (Fn)g_fn_DllGetClassObject;
   return fn ? fn(rclsid, riid, ppv) : E_NOTIMPL;
-}
-
-static LONG WINAPI shim_vectored_handler(EXCEPTION_POINTERS* info) {
-  DWORD code = info->ExceptionRecord->ExceptionCode;
-  /* Skip non-fatal exceptions (breakpoints, C++ exceptions, OutputDebugString, guard pages) */
-  if (code == 0x80000003 || code == 0xE06D7363 || code == 0x40010006 ||
-      code == 0x80000001 || code == 0x406D1388)
-    return EXCEPTION_CONTINUE_SEARCH;
-  /* Write directly to file to avoid recursion via OutputDebugString */
-  if (g_log_file != NULL) {
-    DWORD tick = GetTickCount();
-    fprintf(g_log_file, "[%lu.%03lu] !!! EXCEPTION 0x%08lx at 0x%08lx !!!\n",
-            tick / 1000, tick % 1000, code,
-            (unsigned long)(uintptr_t)info->ExceptionRecord->ExceptionAddress);
-    fprintf(g_log_file, "[%lu.%03lu]   EIP=0x%08lx ESP=0x%08lx EBP=0x%08lx\n",
-            tick / 1000, tick % 1000,
-            info->ContextRecord->Eip, info->ContextRecord->Esp, info->ContextRecord->Ebp);
-    fprintf(g_log_file, "[%lu.%03lu]   EAX=0x%08lx EBX=0x%08lx ECX=0x%08lx EDX=0x%08lx\n",
-            tick / 1000, tick % 1000,
-            info->ContextRecord->Eax, info->ContextRecord->Ebx,
-            info->ContextRecord->Ecx, info->ContextRecord->Edx);
-    fflush(g_log_file);
-  }
-  return EXCEPTION_CONTINUE_SEARCH;
 }
 
 static void WINAPI shim_exit_hook(UINT code) {
@@ -816,26 +787,9 @@ BOOL APIENTRY DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
   if (reason == DLL_PROCESS_ATTACH) {
     DisableThreadLibraryCalls(instance);
     init_runtime_paths();
-    shim_log_init();
-    AddVectoredExceptionHandler(1, shim_vectored_handler);
-    shim_log("=== ddraw proxy DLL loaded (PID %lu) ===", GetCurrentProcessId());
-    if (ensure_exports_loaded()) {
-      shim_log("DllMain: real ddraw exports loaded OK");
-      if (ensure_registry_hooks_loaded()) {
-        shim_log("DllMain: registry IAT hooks installed OK");
-      } else {
-        shim_log("DllMain: registry IAT hooks FAILED");
-      }
-      return TRUE;
-    }
-    shim_log("DllMain: FAILED to load real ddraw exports");
-  } else if (reason == DLL_PROCESS_DETACH) {
-    shim_log("=== ddraw proxy DLL unloading ===");
-    shim_log_close();
-    unregister_redirected_keys();
-    uninstall_registry_hooks();
-    unload_real_ddraw();
-    unload_real_advapi();
+    shim_log_suspend(true);
+    ensure_registry_hooks_loaded();
+    shim_log_suspend(false);
   }
 
   return TRUE;
