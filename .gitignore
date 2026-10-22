@@ -25,6 +25,7 @@ dist/
 # Runtime logs and generated config from local testing
 *.log
 dgVoodoo.conf
+!/config/dgVoodoo.conf
 
 # Local/editor state
 .vs/

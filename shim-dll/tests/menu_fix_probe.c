@@ -97,26 +97,6 @@ int main(void) {
   }
   float x;
   float y;
-  menu_fix_test_scale(2560, 1440, 0.0f, 0.0f, &x, &y);
-  if (expect_close(x, 0.0f, "left") || expect_close(y, 0.0f, "top")) {
-    return 1;
-  }
-  menu_fix_test_scale(1920, 1080, 640.0f, 480.0f, &x, &y);
-  if (expect_close(x, 1920.0f, "right") ||
-      expect_close(y, 1080.0f, "bottom")) {
-    return 1;
-  }
-  menu_fix_test_unscale(2560, 1440, 0.0f, 0.0f, &x, &y);
-  if (expect_close(x, 0.0f, "logical left") ||
-      expect_close(y, 0.0f, "logical top")) {
-    return 1;
-  }
-  menu_fix_test_unscale(2560, 1440, 2560.0f, 1440.0f, &x, &y);
-  if (expect_close(x, 640.0f, "logical right") ||
-      expect_close(y, 480.0f, "logical bottom")) {
-    return 1;
-  }
-
   menu_fix_test_scale_centered(2560, 1440, 0.0f, 0.0f, &x, &y);
   if (expect_close(x, 320.0f, "centered left") ||
       expect_close(y, 0.0f, "centered top")) {

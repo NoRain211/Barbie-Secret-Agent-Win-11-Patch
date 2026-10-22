@@ -16,10 +16,6 @@ void menu_fix_test_render_cursor(void* cursor, void* device, LONG depth,
 bool menu_fix_test_scales_cursor(void);
 void menu_fix_test_cursor_bounds(int width, int height, int* bounds);
 size_t menu_fix_test_vertex_stride(DWORD fvf);
-void menu_fix_test_scale(int width, int height, float x, float y,
-                         float* scaled_x, float* scaled_y);
-void menu_fix_test_unscale(int width, int height, float x, float y,
-                           float* logical_x, float* logical_y);
 void menu_fix_test_scale_centered(int width, int height, float x, float y,
                                   float* scaled_x, float* scaled_y);
 void menu_fix_test_unscale_centered(int width, int height, float x, float y,

@@ -14,6 +14,7 @@
 #include <windows.h>
 
 #include "shim_log.h"
+#include "shim_util.h"
 #include "widescreen_fix.h"
 
 #define ORIGINAL_WIDTH 640
@@ -228,15 +229,6 @@ static bool find_patch_sites(uint8_t* base, size_t size, patch_sites_t* sites) {
   return true;
 }
 
-static bool write_memory(void* address, const void* data, size_t size) {
-  DWORD old_protect;
-  if (!VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &old_protect)) return false;
-  memcpy(address, data, size);
-  FlushInstructionCache(GetCurrentProcess(), address, size);
-  DWORD ignored;
-  return VirtualProtect(address, size, old_protect, &ignored) != FALSE;
-}
-
 static bool write_u32(void* address, uint32_t value) {
   return write_memory(address, &value, sizeof(value));
 }
@@ -258,17 +250,6 @@ static bool apply_skip_intro(void* image, size_t image_size, bool enabled) {
 
 static bool write_float(void* address, float value) {
   return write_memory(address, &value, sizeof(value));
-}
-
-static bool install_jump(uint8_t* address, size_t replaced_length, const void* target) {
-  if (replaced_length < 5) return false;
-  uint8_t patch[16];
-  if (replaced_length > sizeof(patch)) return false;
-  memset(patch, 0x90, replaced_length);
-  patch[0] = 0xE9;
-  int32_t displacement = (int32_t)((const uint8_t*)target - (address + 5));
-  memcpy(patch + 1, &displacement, sizeof(displacement));
-  return write_memory(address, patch, replaced_length);
 }
 
 __attribute__((thiscall)) static void record_error_hook(uint32_t* object, uint32_t error) {
@@ -336,17 +317,6 @@ __attribute__((naked, used)) static void gameplay_fov_hook(void) {
       ::: "eax");
 }
 
-static void config_path(char path[MAX_PATH]) {
-  DWORD length = GetModuleFileNameA(NULL, path, MAX_PATH);
-  if (length == 0 || length >= MAX_PATH) {
-    strcpy_s(path, MAX_PATH, CONFIG_NAME);
-    return;
-  }
-  char* separator = strrchr(path, '\\');
-  if (separator != NULL) *(separator + 1) = '\0';
-  strcat_s(path, MAX_PATH, CONFIG_NAME);
-}
-
 static float read_profile_float(const char* path, const char* section,
                                 const char* key, float fallback) {
   char text[64];
@@ -368,7 +338,7 @@ static bool read_profile_bool(const char* path, const char* section,
 
 static bool load_settings(int* width, int* height) {
   char path[MAX_PATH];
-  config_path(path);
+  shim_game_path(path, CONFIG_NAME);
   if (!read_profile_bool(path, "Fix", "Enabled", true)) {
     shim_log("Widescreen: disabled in %s", CONFIG_NAME);
     return false;
@@ -451,7 +421,7 @@ bool widescreen_fix_init(void) {
   }
 
   char path[MAX_PATH];
-  config_path(path);
+  shim_game_path(path, CONFIG_NAME);
   if (read_profile_bool(path, "Launcher", "SkipIntro", false)) {
     bool skipped = apply_skip_intro(image, mapped_size, true);
     shim_log("Skip intro: %s", skipped ? "enabled" : "signature mismatch; left unchanged");

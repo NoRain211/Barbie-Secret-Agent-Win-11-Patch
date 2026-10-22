@@ -8,6 +8,7 @@
 
 #include "menu_fix.h"
 #include "shim_log.h"
+#include "shim_util.h"
 
 #define ORIGINAL_WIDTH 640
 #define ORIGINAL_HEIGHT 480
@@ -116,14 +117,13 @@ static LONG g_logged_menu_mask = 0;
 static LONG g_logged_dynamic_menu = 0;
 static LONG g_logged_native_cursor_mask = 0;
 static LONG g_cursor_draw_logs = 0;
-#ifdef MENU_FIX_DIAGNOSTICS
-static LONG g_cursor_state_logged = 0;
-#endif
 static LONG g_cursor_texture_synced = 0;
 static LONG g_seen_known_menu = 0;
 static LONG g_viewer_camera_logged = 0;
 static LONG g_clear_logged_mask = 0;
+#ifdef MENU_FIX_DUMP_TEXTURES
 static LONG g_main_menu_texture_dump_mask = 0;
+#endif
 static LONG g_main_menu_override_attempt_mask = 0;
 static LONG g_main_menu_override_loaded_mask = 0;
 static volatile LONG g_active_menu_index = -1;
@@ -150,6 +150,9 @@ static draw_indexed_primitive_fn g_original_draw_indexed_primitive = NULL;
 __attribute__((used)) static const int g_original_ui_width = ORIGINAL_WIDTH;
 __attribute__((used)) static void* g_outfit_distance_return = NULL;
 
+/* Developer-only: build with -DMENU_FIX_DUMP_TEXTURES to extract the source
+   tiles that tools/reconstruct_menu_background.py turns into HD_UI overrides. */
+#ifdef MENU_FIX_DUMP_TEXTURES
 static uint8_t expand_masked_channel(uint32_t pixel, uint32_t mask) {
   if (mask == 0) return 0;
 
@@ -159,6 +162,7 @@ static uint8_t expand_masked_channel(uint32_t pixel, uint32_t mask) {
   uint32_t value = (pixel & mask) >> shift;
   return (uint8_t)((value * 255u + value_mask / 2u) / value_mask);
 }
+#endif
 
 static uint32_t pack_masked_channel(uint8_t channel, uint32_t mask) {
   if (mask == 0) return 0;
@@ -170,6 +174,7 @@ static uint32_t pack_masked_channel(uint8_t channel, uint32_t mask) {
   return (value << shift) & mask;
 }
 
+#ifdef MENU_FIX_DUMP_TEXTURES
 static bool dump_rgb_texture(LPDIRECTDRAWSURFACE7 texture,
                              unsigned tile_index) {
   if (texture == NULL || tile_index >= 6) return false;
@@ -267,6 +272,7 @@ static bool dump_rgb_texture(LPDIRECTDRAWSURFACE7 texture,
            (unsigned long)format->dwRGBBitCount, ok ? path : "write failed");
   return ok;
 }
+#endif
 
 static bool load_bmp_into_texture(LPDIRECTDRAWSURFACE7 texture,
                                   const char* path) {
@@ -366,9 +372,10 @@ static void apply_main_menu_texture_override(IDirect3DDevice7* device,
 
   LPDIRECTDRAWSURFACE7 texture = NULL;
   HRESULT texture_result = IDirect3DDevice7_GetTexture(device, 0, &texture);
+  char name[64];
+  wsprintfA(name, "HD_UI\\Override\\main_menu_tile_%u.bmp", primitive_index);
   char path[MAX_PATH];
-  wsprintfA(path, "HD_UI\\Override\\main_menu_tile_%u.bmp",
-            primitive_index);
+  shim_game_path(path, name);
   bool loaded = SUCCEEDED(texture_result) && texture != NULL &&
                 load_bmp_into_texture(texture, path);
   if (texture != NULL) IDirectDrawSurface7_Release(texture);
@@ -377,6 +384,7 @@ static void apply_main_menu_texture_override(IDirect3DDevice7* device,
            loaded ? "loaded" : "not loaded", path);
 }
 
+#ifdef MENU_FIX_DUMP_TEXTURES
 static void dump_main_menu_texture(IDirect3DDevice7* device,
                                    unsigned primitive_index) {
   if (primitive_index >= 6) return;
@@ -394,18 +402,7 @@ static void dump_main_menu_texture(IDirect3DDevice7* device,
   }
   IDirectDrawSurface7_Release(texture);
 }
-
-static bool write_memory(void* destination, const void* source, size_t size) {
-  DWORD old_protect;
-  if (!VirtualProtect(destination, size, PAGE_EXECUTE_READWRITE, &old_protect)) {
-    return false;
-  }
-  memcpy(destination, source, size);
-  FlushInstructionCache(GetCurrentProcess(), destination, size);
-  DWORD ignored;
-  VirtualProtect(destination, size, old_protect, &ignored);
-  return true;
-}
+#endif
 
 static size_t menu_index_for_vtable(uintptr_t vtable_rva) {
   for (size_t i = 0; i < sizeof(k_menu_slots) / sizeof(k_menu_slots[0]); ++i) {
@@ -454,14 +451,6 @@ static uintptr_t return_address_rva(void* return_address) {
   return (uintptr_t)((uint8_t*)return_address - g_image_base);
 }
 
-#ifdef MENU_FIX_TEST
-static void scale_coordinates(int width, int height, float x, float y,
-                              float* scaled_x, float* scaled_y) {
-  *scaled_x = x * (float)width / ORIGINAL_WIDTH;
-  *scaled_y = y * (float)height / ORIGINAL_HEIGHT;
-}
-#endif
-
 static void scale_centered_coordinates(int width, int height, float x, float y,
                                        float* scaled_x, float* scaled_y) {
   float scale = (float)height / ORIGINAL_HEIGHT;
@@ -469,14 +458,6 @@ static void scale_centered_coordinates(int width, int height, float x, float y,
   *scaled_x = offset_x + x * scale;
   *scaled_y = y * scale;
 }
-
-#ifdef MENU_FIX_TEST
-static void unscale_coordinates(int width, int height, float x, float y,
-                                float* logical_x, float* logical_y) {
-  *logical_x = x * ORIGINAL_WIDTH / (float)width;
-  *logical_y = y * ORIGINAL_HEIGHT / (float)height;
-}
-#endif
 
 static void unscale_centered_coordinates(int width, int height, float x,
                                          float y, float* logical_x,
@@ -732,213 +713,6 @@ static void trace_primitive(DWORD fvf, const void* vertices,
   }
 }
 
-#ifdef MENU_FIX_DIAGNOSTICS
-static void dump_cursor_texture(const DDSURFACEDESC2* desc,
-                                const DDSURFACEDESC2* locked) {
-  if (desc->ddpfPixelFormat.dwRGBBitCount != 16 || locked->lpSurface == NULL ||
-      desc->dwWidth == 0 || desc->dwHeight == 0) {
-    return;
-  }
-
-  DWORD output_width = desc->dwWidth * 2;
-  DWORD row_size = (output_width * 3 + 3) & ~3u;
-  if (desc->dwHeight > SIZE_MAX / row_size) return;
-  size_t pixel_bytes = (size_t)row_size * desc->dwHeight;
-  uint8_t* output = (uint8_t*)calloc(1, pixel_bytes);
-  if (output == NULL) return;
-
-  size_t source_pitch =
-      locked->lPitch < 0 ? (size_t)-locked->lPitch : (size_t)locked->lPitch;
-  for (DWORD y = 0; y < desc->dwHeight; ++y) {
-    const uint16_t* source =
-        (const uint16_t*)((const uint8_t*)locked->lpSurface + y * source_pitch);
-    uint8_t* destination = output + y * row_size;
-    for (DWORD x = 0; x < desc->dwWidth; ++x) {
-      uint16_t pixel = source[x];
-      uint8_t alpha = (uint8_t)(((pixel & desc->ddpfPixelFormat.dwRGBAlphaBitMask) >>
-                                 12) *
-                                17);
-      uint8_t red = (uint8_t)(((pixel & desc->ddpfPixelFormat.dwRBitMask) >> 8) *
-                              17);
-      uint8_t green =
-          (uint8_t)(((pixel & desc->ddpfPixelFormat.dwGBitMask) >> 4) * 17);
-      uint8_t blue =
-          (uint8_t)((pixel & desc->ddpfPixelFormat.dwBBitMask) * 17);
-      destination[x * 3 + 0] = blue;
-      destination[x * 3 + 1] = green;
-      destination[x * 3 + 2] = red;
-      size_t alpha_offset = (size_t)(x + desc->dwWidth) * 3;
-      destination[alpha_offset + 0] = alpha;
-      destination[alpha_offset + 1] = alpha;
-      destination[alpha_offset + 2] = alpha;
-    }
-  }
-
-  BITMAPFILEHEADER file_header;
-  BITMAPINFOHEADER info_header;
-  memset(&file_header, 0, sizeof(file_header));
-  memset(&info_header, 0, sizeof(info_header));
-  file_header.bfType = 0x4d42;
-  file_header.bfOffBits = sizeof(file_header) + sizeof(info_header);
-  file_header.bfSize = file_header.bfOffBits + (DWORD)pixel_bytes;
-  info_header.biSize = sizeof(info_header);
-  info_header.biWidth = (LONG)output_width;
-  info_header.biHeight = -(LONG)desc->dwHeight;
-  info_header.biPlanes = 1;
-  info_header.biBitCount = 24;
-  info_header.biCompression = BI_RGB;
-  info_header.biSizeImage = (DWORD)pixel_bytes;
-
-  HANDLE file = CreateFileA("cursor_texture_dump.bmp", GENERIC_WRITE,
-                            FILE_SHARE_READ, NULL, CREATE_ALWAYS,
-                            FILE_ATTRIBUTE_NORMAL, NULL);
-  if (file != INVALID_HANDLE_VALUE) {
-    DWORD written;
-    BOOL ok = WriteFile(file, &file_header, sizeof(file_header), &written, NULL) &&
-              written == sizeof(file_header) &&
-              WriteFile(file, &info_header, sizeof(info_header), &written, NULL) &&
-              written == sizeof(info_header) &&
-              WriteFile(file, output, (DWORD)pixel_bytes, &written, NULL) &&
-              written == pixel_bytes;
-    shim_log("Cursor texture dump: %s", ok ? "cursor_texture_dump.bmp"
-                                             : "write failed");
-    CloseHandle(file);
-  }
-  free(output);
-}
-
-static void log_cursor_draw_state(IDirect3DDevice7* device, DWORD fvf,
-                                  const void* vertices, DWORD vertex_count,
-                                  LPDIRECTDRAWSURFACE7 texture,
-                                  const DDSURFACEDESC2* desc) {
-  if (InterlockedCompareExchange(&g_cursor_state_logged, 1, 0) != 0) return;
-
-  DWORD alpha_test = 0xffffffffu;
-  DWORD source_blend = 0xffffffffu;
-  DWORD destination_blend = 0xffffffffu;
-  DWORD alpha_blend = 0xffffffffu;
-  DWORD color_key = 0xffffffffu;
-  DWORD color_op = 0xffffffffu;
-  DWORD color_arg1 = 0xffffffffu;
-  DWORD color_arg2 = 0xffffffffu;
-  DWORD alpha_op = 0xffffffffu;
-  DWORD alpha_arg1 = 0xffffffffu;
-  DWORD alpha_arg2 = 0xffffffffu;
-  IDirect3DDevice7_GetRenderState(device, D3DRENDERSTATE_ALPHATESTENABLE,
-                                  &alpha_test);
-  IDirect3DDevice7_GetRenderState(device, D3DRENDERSTATE_SRCBLEND,
-                                  &source_blend);
-  IDirect3DDevice7_GetRenderState(device, D3DRENDERSTATE_DESTBLEND,
-                                  &destination_blend);
-  IDirect3DDevice7_GetRenderState(device, D3DRENDERSTATE_ALPHABLENDENABLE,
-                                  &alpha_blend);
-  IDirect3DDevice7_GetRenderState(device, D3DRENDERSTATE_COLORKEYENABLE,
-                                  &color_key);
-  IDirect3DDevice7_GetTextureStageState(device, 0, D3DTSS_COLOROP, &color_op);
-  IDirect3DDevice7_GetTextureStageState(device, 0, D3DTSS_COLORARG1,
-                                        &color_arg1);
-  IDirect3DDevice7_GetTextureStageState(device, 0, D3DTSS_COLORARG2,
-                                        &color_arg2);
-  IDirect3DDevice7_GetTextureStageState(device, 0, D3DTSS_ALPHAOP, &alpha_op);
-  IDirect3DDevice7_GetTextureStageState(device, 0, D3DTSS_ALPHAARG1,
-                                        &alpha_arg1);
-  IDirect3DDevice7_GetTextureStageState(device, 0, D3DTSS_ALPHAARG2,
-                                        &alpha_arg2);
-  shim_log("Cursor state: atest=%lu blend=%lu src=%lu dst=%lu ckey=%lu "
-           "color=(%lu,%lu,%lu) alpha=(%lu,%lu,%lu)",
-           (unsigned long)alpha_test, (unsigned long)alpha_blend,
-           (unsigned long)source_blend, (unsigned long)destination_blend,
-           (unsigned long)color_key, (unsigned long)color_op,
-           (unsigned long)color_arg1, (unsigned long)color_arg2,
-           (unsigned long)alpha_op, (unsigned long)alpha_arg1,
-           (unsigned long)alpha_arg2);
-
-  size_t stride = transformed_vertex_stride(fvf);
-  if (stride != 0 && vertices != NULL && vertex_count != 0) {
-    shim_log("Cursor vertices: fvf=0x%08lx count=%lu stride=%lu",
-             (unsigned long)fvf, (unsigned long)vertex_count,
-             (unsigned long)stride);
-    for (DWORD i = 0; i < vertex_count; ++i) {
-      const uint8_t* vertex = (const uint8_t*)vertices + i * stride;
-      const float* position = (const float*)vertex;
-      size_t color_offset = 4 * sizeof(float);
-      if (fvf & D3DFVF_NORMAL) color_offset += 3 * sizeof(float);
-      DWORD diffuse = 0xffffffffu;
-      DWORD specular = 0xffffffffu;
-      if (fvf & D3DFVF_DIFFUSE) {
-        memcpy(&diffuse, vertex + color_offset, sizeof(diffuse));
-        color_offset += sizeof(DWORD);
-      }
-      if (fvf & D3DFVF_SPECULAR) {
-        memcpy(&specular, vertex + color_offset, sizeof(specular));
-        color_offset += sizeof(DWORD);
-      }
-      float u = 0.0f;
-      float v = 0.0f;
-      if ((fvf & D3DFVF_TEXCOUNT_MASK) != 0) {
-        memcpy(&u, vertex + color_offset, sizeof(u));
-        memcpy(&v, vertex + color_offset + sizeof(u), sizeof(v));
-      }
-      shim_log("Cursor vertex %lu: pos=(%.1f,%.1f,%.3f,%.3f) "
-               "diffuse=0x%08lx specular=0x%08lx uv=(%.3f,%.3f)",
-               (unsigned long)i, position[0], position[1], position[2],
-               position[3], (unsigned long)diffuse, (unsigned long)specular,
-               u, v);
-    }
-  }
-
-  if (texture == NULL || desc == NULL) return;
-  const DDPIXELFORMAT* format = &desc->ddpfPixelFormat;
-  shim_log("Cursor texture: caps=0x%08lx flags=0x%08lx fourcc=0x%08lx "
-           "bpp=%lu masks=%08lx/%08lx/%08lx/%08lx mipmaps=%lu pitch=%ld",
-           (unsigned long)desc->ddsCaps.dwCaps, (unsigned long)format->dwFlags,
-           (unsigned long)format->dwFourCC, (unsigned long)format->dwRGBBitCount,
-           (unsigned long)format->dwRBitMask,
-           (unsigned long)format->dwGBitMask,
-           (unsigned long)format->dwBBitMask,
-           (unsigned long)format->dwRGBAlphaBitMask,
-           (unsigned long)desc->dwMipMapCount, (long)desc->lPitch);
-
-  DDCOLORKEY source_key;
-  memset(&source_key, 0, sizeof(source_key));
-  HRESULT key_result =
-      IDirectDrawSurface7_GetColorKey(texture, DDCKEY_SRCBLT, &source_key);
-  shim_log("Cursor color key: result=0x%08lx low=0x%08lx high=0x%08lx",
-           (unsigned long)key_result, (unsigned long)source_key.dwColorSpaceLowValue,
-           (unsigned long)source_key.dwColorSpaceHighValue);
-
-  DDSURFACEDESC2 locked;
-  memset(&locked, 0, sizeof(locked));
-  locked.dwSize = sizeof(locked);
-  HRESULT lock_result = IDirectDrawSurface7_Lock(
-      texture, NULL, &locked, DDLOCK_READONLY | DDLOCK_WAIT, NULL);
-  uint32_t hash = 2166136261u;
-  unsigned first[4] = {0, 0, 0, 0};
-  if (SUCCEEDED(lock_result) && locked.lpSurface != NULL) {
-    const uint8_t* pixels = (const uint8_t*)locked.lpSurface;
-    size_t pitch = locked.lPitch < 0 ? (size_t)-locked.lPitch
-                                    : (size_t)locked.lPitch;
-    size_t bytes_per_pixel = (format->dwRGBBitCount + 7) / 8;
-    size_t row_bytes = (size_t)desc->dwWidth * bytes_per_pixel;
-    if (row_bytes == 0 || row_bytes > pitch) row_bytes = pitch;
-    for (unsigned i = 0; i < 4 && i < row_bytes; ++i) first[i] = pixels[i];
-    for (DWORD y = 0; y < desc->dwHeight; ++y) {
-      const uint8_t* row = pixels + y * pitch;
-      for (size_t x = 0; x < row_bytes; ++x) {
-        hash ^= row[x];
-        hash *= 16777619u;
-      }
-    }
-    dump_cursor_texture(desc, &locked);
-    IDirectDrawSurface7_Unlock(texture, NULL);
-  }
-  shim_log("Cursor pixels: lock=0x%08lx pitch=%ld hash=0x%08lx "
-           "first=%02x%02x%02x%02x",
-           (unsigned long)lock_result, (long)locked.lPitch,
-           (unsigned long)hash, first[0], first[1], first[2], first[3]);
-}
-#endif
-
 static bool cursor_texture_needs_sync(const DDSURFACEDESC2* desc) {
   if (desc == NULL) return false;
   const DDPIXELFORMAT* format = &desc->ddpfPixelFormat;
@@ -1059,12 +833,26 @@ static bool should_scale_primitive(DWORD fvf, const void* vertices,
           InterlockedCompareExchange(&g_seen_known_menu, 0, 0) == 0);
 }
 
-static HRESULT WINAPI menu_draw_primitive(
-    IDirect3DDevice7* device, D3DPRIMITIVETYPE primitive_type, DWORD fvf,
-    void* vertices, DWORD vertex_count, DWORD flags) {
+static HRESULT draw_original(IDirect3DDevice7* device, D3DPRIMITIVETYPE type,
+                             DWORD fvf, void* vertices, DWORD vertex_count,
+                             bool indexed, WORD* indices, DWORD index_count,
+                             DWORD flags) {
+  return indexed ? g_original_draw_indexed_primitive(device, type, fvf, vertices,
+                                                     vertex_count, indices,
+                                                     index_count, flags)
+                 : g_original_draw_primitive(device, type, fvf, vertices,
+                                             vertex_count, flags);
+}
+
+/* Shared body of the DrawPrimitive and DrawIndexedPrimitive hooks. */
+static HRESULT draw_menu_primitive(void* return_address, IDirect3DDevice7* device,
+                                   D3DPRIMITIVETYPE type, DWORD fvf,
+                                   void* vertices, DWORD vertex_count,
+                                   bool indexed, WORD* indices,
+                                   DWORD index_count, DWORD flags) {
   if (transformed_vertex_stride(fvf) == 0) {
-    return g_original_draw_primitive(device, primitive_type, fvf, vertices,
-                                     vertex_count, flags);
+    return draw_original(device, type, fvf, vertices, vertex_count, indexed,
+                         indices, index_count, flags);
   }
 
   LONG active_menu = InterlockedCompareExchange(&g_active_menu_index, 0, 0);
@@ -1072,7 +860,9 @@ static HRESULT WINAPI menu_draw_primitive(
   bool main_background =
       active_menu == MAIN_MENU_INDEX && primitive_index < 6;
   if (main_background) {
+#ifdef MENU_FIX_DUMP_TEXTURES
     dump_main_menu_texture(device, primitive_index);
+#endif
     apply_main_menu_texture_override(device, primitive_index);
   }
   bool scale = should_scale_primitive(fvf, vertices, vertex_count);
@@ -1083,77 +873,43 @@ static HRESULT WINAPI menu_draw_primitive(
   float cursor_z;
   float cursor_rhw;
   if (!scale && untextured_cursor_candidate(
-                    device, fvf, vertices, vertex_count,
-                    __builtin_return_address(0), &cursor_left, &cursor_top,
-                    &cursor_z, &cursor_rhw)) {
+                    device, fvf, vertices, vertex_count, return_address,
+                    &cursor_left, &cursor_top, &cursor_z, &cursor_rhw)) {
     return draw_fallback_cursor(device, cursor_left, cursor_top, cursor_z,
                                 cursor_rhw, flags);
   }
-  trace_primitive(fvf, vertices, vertex_count, __builtin_return_address(0),
-                  scale);
+  trace_primitive(fvf, vertices, vertex_count, return_address, scale);
   if (!scale) {
-    return g_original_draw_primitive(device, primitive_type, fvf, vertices,
-                                     vertex_count, flags);
+    return draw_original(device, type, fvf, vertices, vertex_count, indexed,
+                         indices, index_count, flags);
   }
   LONG policy = InterlockedCompareExchange(&g_render_policy, 0, 0);
   void* scaled = scaled_vertex_copy(fvf, vertices, vertex_count, policy,
                                     stretch_background);
-  HRESULT result = g_original_draw_primitive(
-      device, primitive_type, fvf, scaled != NULL ? scaled : vertices,
-      vertex_count, flags);
+  HRESULT result = draw_original(device, type, fvf,
+                                 scaled != NULL ? scaled : vertices,
+                                 vertex_count, indexed, indices, index_count,
+                                 flags);
   free(scaled);
   return result;
+}
+
+static HRESULT WINAPI menu_draw_primitive(
+    IDirect3DDevice7* device, D3DPRIMITIVETYPE primitive_type, DWORD fvf,
+    void* vertices, DWORD vertex_count, DWORD flags) {
+  return draw_menu_primitive(__builtin_return_address(0), device,
+                             primitive_type, fvf, vertices, vertex_count, false,
+                             NULL, 0, flags);
 }
 
 static HRESULT WINAPI menu_draw_indexed_primitive(
     IDirect3DDevice7* device, D3DPRIMITIVETYPE primitive_type, DWORD fvf,
     void* vertices, DWORD vertex_count, WORD* indices, DWORD index_count,
     DWORD flags) {
-  if (transformed_vertex_stride(fvf) == 0) {
-    return g_original_draw_indexed_primitive(
-        device, primitive_type, fvf, vertices, vertex_count, indices,
-        index_count, flags);
-  }
-
-  LONG active_menu = InterlockedCompareExchange(&g_active_menu_index, 0, 0);
-  unsigned primitive_index = g_active_primitive_index++;
-  bool main_background =
-      active_menu == MAIN_MENU_INDEX && primitive_index < 6;
-  if (main_background) {
-    dump_main_menu_texture(device, primitive_index);
-    apply_main_menu_texture_override(device, primitive_index);
-  }
-  bool scale = should_scale_primitive(fvf, vertices, vertex_count);
-  bool stretch_background = main_background ||
-      (active_menu == TOOL_OVERLAY_INDEX && primitive_index < 6);
-  float cursor_left;
-  float cursor_top;
-  float cursor_z;
-  float cursor_rhw;
-  if (!scale && untextured_cursor_candidate(
-                    device, fvf, vertices, vertex_count,
-                    __builtin_return_address(0), &cursor_left, &cursor_top,
-                    &cursor_z, &cursor_rhw)) {
-    return draw_fallback_cursor(device, cursor_left, cursor_top, cursor_z,
-                                cursor_rhw, flags);
-  }
-  trace_primitive(fvf, vertices, vertex_count, __builtin_return_address(0),
-                  scale);
-  if (!scale) {
-    return g_original_draw_indexed_primitive(
-        device, primitive_type, fvf, vertices, vertex_count, indices,
-        index_count, flags);
-  }
-  LONG policy = InterlockedCompareExchange(&g_render_policy, 0, 0);
-  void* scaled = scaled_vertex_copy(fvf, vertices, vertex_count, policy,
-                                    stretch_background);
-  HRESULT result = g_original_draw_indexed_primitive(
-      device, primitive_type, fvf, scaled != NULL ? scaled : vertices,
-      vertex_count, indices, index_count, flags);
-  free(scaled);
-  return result;
+  return draw_menu_primitive(__builtin_return_address(0), device,
+                             primitive_type, fvf, vertices, vertex_count, true,
+                             indices, index_count, flags);
 }
-
 static float zoomed_fov(float fov, float factor) {
   const float radians_per_degree = 3.14159265358979323846f / 180.0f;
   return 2.0f * atanf(tanf(fov * 0.5f * radians_per_degree) / factor) /
@@ -1360,17 +1116,10 @@ static void __attribute__((thiscall)) menu_render_hook(void* self) {
 
 static bool install_cursor_getter_hook(void) {
   uint8_t* site = g_image_base + CURSOR_GETTER_RVA;
-  if (memcmp(site, k_cursor_getter_signature,
-             sizeof(k_cursor_getter_signature)) != 0) {
-    return false;
-  }
-
-  uint8_t patch[sizeof(k_cursor_getter_signature)] = {0xE9};
-  int32_t relative =
-      (int32_t)((uint8_t*)cursor_position_getter_hook - (site + 5));
-  memcpy(patch + 1, &relative, sizeof(relative));
-  patch[5] = 0x90;
-  return write_memory(site, patch, sizeof(patch));
+  return memcmp(site, k_cursor_getter_signature,
+                sizeof(k_cursor_getter_signature)) == 0 &&
+         install_jump(site, sizeof(k_cursor_getter_signature),
+                      cursor_position_getter_hook);
 }
 
 static void screen_cursor_bounds(int width, int height, int* bounds) {
@@ -1389,13 +1138,10 @@ static void cursor_menu_bounds_hook(void* menu) {
 
 static bool install_cursor_bounds_hook(void) {
   uint8_t* site = g_image_base + CURSOR_MENU_BOUNDS_RVA;
-  if (memcmp(site, k_cursor_bounds_signature,
-             sizeof(k_cursor_bounds_signature)) != 0) return false;
-  uint8_t patch[sizeof(k_cursor_bounds_signature)] = {0xE9};
-  int32_t relative = (int32_t)((uint8_t*)cursor_menu_bounds_hook - (site + 5));
-  memcpy(patch + 1, &relative, sizeof(relative));
-  memset(patch + 5, 0x90, sizeof(patch) - 5);
-  return write_memory(site, patch, sizeof(patch));
+  return memcmp(site, k_cursor_bounds_signature,
+                sizeof(k_cursor_bounds_signature)) == 0 &&
+         install_jump(site, sizeof(k_cursor_bounds_signature),
+                      cursor_menu_bounds_hook);
 }
 
 static bool install_cursor_render_hook(void) {
@@ -1403,12 +1149,8 @@ static bool install_cursor_render_hook(void) {
       0x8B, 0x0D, 0x6C, 0xBC, 0x9A, 0x00, 0x8B, 0x01, 0xFF, 0x60, 0x08,
   };
   uint8_t* site = g_image_base + CURSOR_RENDER_RVA;
-  if (memcmp(site, signature, sizeof(signature)) != 0) return false;
-  uint8_t patch[sizeof(signature)] = {0xE9};
-  int32_t relative = (int32_t)((uint8_t*)cursor_render_hook - (site + 5));
-  memcpy(patch + 1, &relative, sizeof(relative));
-  memset(patch + 5, 0x90, sizeof(patch) - 5);
-  return write_memory(site, patch, sizeof(patch));
+  return memcmp(site, signature, sizeof(signature)) == 0 &&
+         install_jump(site, sizeof(signature), cursor_render_hook);
 }
 
 __attribute__((naked, used)) static void outfit_distance_hook(void) {
@@ -1425,12 +1167,8 @@ static bool install_outfit_distance_hook(void) {
   };
   uint8_t* site = g_image_base + OUTFIT_CAMERA_DISTANCE_RVA;
   if (memcmp(site, signature, sizeof(signature)) != 0) return false;
-  uint8_t patch[sizeof(signature)] = {0xE9};
-  int32_t relative = (int32_t)((uint8_t*)outfit_distance_hook - (site + 5));
-  memcpy(patch + 1, &relative, sizeof(relative));
-  memset(patch + 5, 0x90, sizeof(patch) - 5);
   g_outfit_distance_return = site + sizeof(signature);
-  return write_memory(site, patch, sizeof(patch));
+  return install_jump(site, sizeof(signature), outfit_distance_hook);
 }
 
 static bool install_device_ready_hook(void) {
@@ -1514,58 +1252,43 @@ bool menu_fix_init(int width, int height) {
   const size_t trampoline_size = sizeof(k_menu_render_signature) + 5;
   uint8_t* trampoline = (uint8_t*)VirtualAlloc(
       NULL, trampoline_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-  if (trampoline == NULL) {
-    shim_log("Menu fix: failed to allocate shared render trampoline");
+  if (trampoline != NULL) {
+    memcpy(trampoline, render_site, sizeof(k_menu_render_signature));
+  }
+  if (trampoline == NULL ||
+      !install_jump(trampoline + sizeof(k_menu_render_signature), 5,
+                    render_site + sizeof(k_menu_render_signature))) {
+    shim_log("Menu fix: failed to build shared render trampoline");
     InterlockedExchange(&g_init_state, 3);
     return false;
   }
-  memcpy(trampoline, render_site, sizeof(k_menu_render_signature));
-  trampoline[sizeof(k_menu_render_signature)] = 0xE9;
-  int32_t trampoline_relative =
-      (int32_t)((render_site + sizeof(k_menu_render_signature)) -
-                (trampoline + trampoline_size));
-  memcpy(trampoline + sizeof(k_menu_render_signature) + 1,
-         &trampoline_relative, sizeof(trampoline_relative));
-  FlushInstructionCache(GetCurrentProcess(), trampoline, trampoline_size);
   g_original_menu_render = (menu_render_fn)trampoline;
 
   const size_t update_trampoline_size = sizeof(k_menu_update_signature) + 5;
   uint8_t* update_trampoline = (uint8_t*)VirtualAlloc(
       NULL, update_trampoline_size, MEM_COMMIT | MEM_RESERVE,
       PAGE_EXECUTE_READWRITE);
-  if (update_trampoline == NULL) {
-    shim_log("Menu fix: failed to allocate shared update trampoline");
+  if (update_trampoline != NULL) {
+    memcpy(update_trampoline, update_site, sizeof(k_menu_update_signature));
+  }
+  if (update_trampoline == NULL ||
+      !install_jump(update_trampoline + sizeof(k_menu_update_signature), 5,
+                    update_site + sizeof(k_menu_update_signature))) {
+    shim_log("Menu fix: failed to build shared update trampoline");
     InterlockedExchange(&g_init_state, 3);
     return false;
   }
-  memcpy(update_trampoline, update_site, sizeof(k_menu_update_signature));
-  update_trampoline[sizeof(k_menu_update_signature)] = 0xE9;
-  int32_t update_trampoline_relative =
-      (int32_t)((update_site + sizeof(k_menu_update_signature)) -
-                (update_trampoline + update_trampoline_size));
-  memcpy(update_trampoline + sizeof(k_menu_update_signature) + 1,
-         &update_trampoline_relative, sizeof(update_trampoline_relative));
-  FlushInstructionCache(GetCurrentProcess(), update_trampoline,
-                        update_trampoline_size);
   g_original_menu_update = (menu_update_fn)update_trampoline;
 
-  uint8_t render_patch[sizeof(k_menu_render_signature)] = {0xE9};
-  int32_t render_relative =
-      (int32_t)((uint8_t*)menu_render_hook - (render_site + 5));
-  memcpy(render_patch + 1, &render_relative, sizeof(render_relative));
-  render_patch[5] = 0x90;
-  if (!write_memory(render_site, render_patch, sizeof(render_patch))) {
+  if (!install_jump(render_site, sizeof(k_menu_render_signature),
+                    menu_render_hook)) {
     shim_log("Menu fix: failed to patch shared renderer");
     InterlockedExchange(&g_init_state, 3);
     return false;
   }
 
-  uint8_t update_patch[sizeof(k_menu_update_signature)] = {0xE9};
-  int32_t update_relative =
-      (int32_t)((uint8_t*)menu_update_hook - (update_site + 5));
-  memcpy(update_patch + 1, &update_relative, sizeof(update_relative));
-  update_patch[5] = 0x90;
-  if (!write_memory(update_site, update_patch, sizeof(update_patch))) {
+  if (!install_jump(update_site, sizeof(k_menu_update_signature),
+                    menu_update_hook)) {
     write_memory(render_site, k_menu_render_signature,
                  sizeof(k_menu_render_signature));
     shim_log("Menu fix: failed to patch shared updater");
@@ -1628,16 +1351,6 @@ void menu_fix_test_cursor_bounds(int width, int height, int* bounds) {
 
 size_t menu_fix_test_vertex_stride(DWORD fvf) {
   return transformed_vertex_stride(fvf);
-}
-
-void menu_fix_test_scale(int width, int height, float x, float y,
-                         float* scaled_x, float* scaled_y) {
-  scale_coordinates(width, height, x, y, scaled_x, scaled_y);
-}
-
-void menu_fix_test_unscale(int width, int height, float x, float y,
-                           float* logical_x, float* logical_y) {
-  unscale_coordinates(width, height, x, y, logical_x, logical_y);
 }
 
 void menu_fix_test_scale_centered(int width, int height, float x, float y,

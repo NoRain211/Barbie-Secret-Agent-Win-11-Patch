@@ -1,3 +1,5 @@
+# Recipes use cmd syntax, even when Git's sh.exe is on PATH.
+SHELL = cmd.exe
 CC = gcc
 CFLAGS ?= -std=gnu11 -Wall -Wextra -O2 -m32 -DINITGUID -DSHIM_DEBUG -Iinclude
 LDFLAGS ?= -shared
@@ -20,7 +22,7 @@ DINPUT_LOGIC_PROBE = $(TEST_DIR)/dinput_logic_probe.exe
 DINPUT_ABI_PROBE = $(TEST_DIR)/dinput_abi_probe.exe
 WIDESCREEN_PROBE = $(TEST_DIR)/widescreen_probe.exe
 MENU_FIX_PROBE = $(TEST_DIR)/menu_fix_probe.exe
-TEST_LOGS = $(TEST_DIR)/ddraw_proxy.log $(TEST_DIR)/dinput_proxy.log
+GAME_EXE = ../game-files/SecretAgent.exe
 
 all: $(DDRAW_OUT) $(DINPUT_OUT)
 
@@ -29,14 +31,6 @@ $(DDRAW_OUT): $(DDRAW_SRC)
 
 $(DINPUT_OUT): $(DINPUT_SRC)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(DINPUT_DEF) $(LDLIBS) -Wl,--enable-stdcall-fixup
-
-# Explicit debug aliases. Distributed builds also keep logging enabled so
-# support reports can confirm the shims loaded.
-debug-ddraw: $(DDRAW_SRC)
-	$(CC) $(CFLAGS) -o $(DDRAW_OUT) $^ $(LDFLAGS) $(DDRAW_DEF) $(LDLIBS) -Wl,--enable-stdcall-fixup
-
-debug-dinput: $(DINPUT_SRC)
-	$(CC) $(CFLAGS) -o $(DINPUT_OUT) $^ $(LDFLAGS) $(DINPUT_DEF) $(LDLIBS) -Wl,--enable-stdcall-fixup
 
 $(TEST_DIR):
 	if not exist "$(TEST_DIR)" mkdir "$(TEST_DIR)"
@@ -67,13 +61,12 @@ test: all $(REGISTRY_PROBE) $(DDRAW_ABI_PROBE) $(DINPUT_LOGIC_PROBE) $(DINPUT_AB
 	$(DDRAW_ABI_PROBE) ./$(DDRAW_OUT)
 	$(DINPUT_LOGIC_PROBE)
 	$(DINPUT_ABI_PROBE) ./$(DINPUT_OUT)
-	$(WIDESCREEN_PROBE) ../game-files/SecretAgent.exe
 	$(MENU_FIX_PROBE)
+	$(if $(wildcard $(GAME_EXE)),$(WIDESCREEN_PROBE) $(GAME_EXE),@echo Skipped widescreen probe: $(GAME_EXE) not found)
 
 clean:
-	rm -f $(DDRAW_OUT) $(DINPUT_OUT) $(REGISTRY_PROBE) $(DDRAW_ABI_PROBE) \
-		$(DINPUT_LOGIC_PROBE) $(DINPUT_ABI_PROBE) $(WIDESCREEN_PROBE) \
-		$(MENU_FIX_PROBE) $(TEST_LOGS)
-	-if exist "$(TEST_DIR)" rmdir "$(TEST_DIR)"
+	-if exist $(DDRAW_OUT) del /q $(DDRAW_OUT)
+	-if exist $(DINPUT_OUT) del /q $(DINPUT_OUT)
+	-if exist build rmdir /s /q build
 
-.PHONY: all debug-ddraw debug-dinput test clean
+.PHONY: all test clean

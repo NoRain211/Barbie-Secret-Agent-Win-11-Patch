@@ -7,6 +7,12 @@
 #include <string.h>
 #include <windows.h>
 
+#include "shim_util.h"
+
+#ifndef SHIM_LOG_NAME
+#define SHIM_LOG_NAME "ddraw_proxy.log"
+#endif
+
 extern FILE* g_log_file;
 extern bool g_log_suspended;
 
@@ -15,11 +21,7 @@ extern bool g_log_suspended;
 static inline void shim_log_init(void) {
   if (g_log_suspended || g_log_file != NULL) return;
   char path[MAX_PATH];
-  DWORD path_len = GetModuleFileNameA(NULL, path, MAX_PATH);
-  if (path_len == 0 || path_len >= MAX_PATH) return;
-  char* slash = strrchr(path, '\\');
-  if (slash) *(slash + 1) = '\0';
-  if (strcat_s(path, MAX_PATH, "ddraw_proxy.log") != 0) return;
+  shim_game_path(path, SHIM_LOG_NAME);
   g_log_file = fopen(path, "w");
 }
 

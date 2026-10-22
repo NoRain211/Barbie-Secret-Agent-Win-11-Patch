@@ -16,34 +16,10 @@
 
 /* ── Logging (debug builds only) ──────────────────────────────────── */
 
-#if defined(SHIM_DEBUG) || defined(DEBUG)
-static FILE* g_log_file = NULL;
-static void di_log_init(void) {
-    if (g_log_file) return;
-    char path[MAX_PATH];
-    DWORD path_len = GetModuleFileNameA(NULL, path, MAX_PATH);
-    if (path_len == 0 || path_len >= MAX_PATH) return;
-    char* s = strrchr(path, '\\');
-    if (s) *(s + 1) = '\0';
-    if (strcat_s(path, MAX_PATH, "dinput_proxy.log") != 0) return;
-    g_log_file = fopen(path, "w");
-}
-static void di_log(const char* fmt, ...) {
-    va_list a;
-    if (!g_log_file) di_log_init();
-    if (!g_log_file) return;
-    DWORD t = GetTickCount();
-    fprintf(g_log_file, "[%lu.%03lu] ", t / 1000, t % 1000);
-    va_start(a, fmt);
-    vfprintf(g_log_file, fmt, a);
-    va_end(a);
-    fprintf(g_log_file, "\n");
-    fflush(g_log_file);
-}
-#else
-#define di_log_init()
-#define di_log(...)
-#endif
+#define SHIM_LOG_NAME "dinput_proxy.log"
+#include "shim_log.h"
+FILE* g_log_file = NULL;
+bool g_log_suspended = false;
 
 /* ── DInput / XInput types (avoid SDK headers) ────────────────────── */
 
@@ -493,7 +469,7 @@ struct XInputDevice {
 /* ── XInput device method implementations ─────────────────────────── */
 
 static HRESULT_T STDMETHODCALLTYPE xdev_QueryInterface(XInputDevice* self, const MY_IID* riid, void** ppv) {
-    di_log("XInputDevice: QueryInterface(iid=%08lx-%04x-%04x) ppv=%p self=%p",
+    shim_log("XInputDevice: QueryInterface(iid=%08lx-%04x-%04x) ppv=%p self=%p",
            riid ? riid->Data1 : 0, riid ? riid->Data2 : 0, riid ? riid->Data3 : 0,
            (void*)ppv, (void*)self);
     if (!ppv || !riid) return E_POINTER_T;
@@ -506,7 +482,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_QueryInterface(XInputDevice* self, const
     }
     *ppv = self;
     LONG refs = InterlockedIncrement(&self->ref_count);
-    di_log("XInputDevice: QI wrote *ppv=%p refcount=%ld", (void*)*ppv, refs);
+    shim_log("XInputDevice: QI wrote *ppv=%p refcount=%ld", (void*)*ppv, refs);
     (void)refs;
     return DI_OK;
 }
@@ -519,14 +495,14 @@ static ULONG STDMETHODCALLTYPE xdev_Release(XInputDevice* self) {
     LONG r = InterlockedDecrement(&self->ref_count);
     if (r <= 0) {
         release_synthetic_input(&self->synthetic);
-        di_log("XInputDevice: destroyed (user %lu)", self->user_index);
+        shim_log("XInputDevice: destroyed (user %lu)", self->user_index);
         HeapFree(GetProcessHeap(), 0, self);
     }
     return r;
 }
 
 static HRESULT_T STDMETHODCALLTYPE xdev_GetCapabilities(XInputDevice* self, DIDEVCAPS* caps) {
-    di_log("XInputDevice: GetCapabilities");
+    shim_log("XInputDevice: GetCapabilities");
     (void)self;
     if (!caps) return DIERR_INVALIDPARAM;
     DWORD size = caps->dwSize;
@@ -544,7 +520,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_GetCapabilities(XInputDevice* self, DIDE
 }
 
 static HRESULT_T STDMETHODCALLTYPE xdev_EnumObjects(XInputDevice* s, void* cb, void* ref, DWORD fl) {
-    di_log("XInputDevice: EnumObjects(flags=0x%lx)", fl);
+    shim_log("XInputDevice: EnumObjects(flags=0x%lx)", fl);
     (void)s;
     LPDIENUMDEVICEOBJECTSCALLBACKA callback = (LPDIENUMDEVICEOBJECTSCALLBACKA)cb;
     if (!callback) return DIERR_INVALIDPARAM;
@@ -609,7 +585,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_EnumObjects(XInputDevice* s, void* cb, v
 }
 
 static HRESULT_T STDMETHODCALLTYPE xdev_GetProperty(XInputDevice* self, const MY_GUID* g, void* h) {
-    di_log("XInputDevice: GetProperty(prop=%lu)", IS_DIPROP(g) ? (unsigned long)(uintptr_t)g : 0);
+    shim_log("XInputDevice: GetProperty(prop=%lu)", IS_DIPROP(g) ? (unsigned long)(uintptr_t)g : 0);
     if (!h) return DIERR_INVALIDPARAM;
     DIPROPHEADER* hdr = (DIPROPHEADER*)h;
     if (hdr->dwHeaderSize != sizeof(DIPROPHEADER)) return DIERR_INVALIDPARAM;
@@ -648,7 +624,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_SetProperty(XInputDevice* self, const MY
 
     if (g == DIPROP_RANGE) {
         const DIPROPRANGE* pr = (const DIPROPRANGE*)h;
-        di_log("XInputDevice: SetProperty DIPROP_RANGE obj=%lu how=%lu min=%ld max=%ld",
+        shim_log("XInputDevice: SetProperty DIPROP_RANGE obj=%lu how=%lu min=%ld max=%ld",
                hdr->dwObj, hdr->dwHow, pr->lMin, pr->lMax);
         if (hdr->dwSize != sizeof(DIPROPRANGE) || pr->lMin >= pr->lMax)
             return DIERR_INVALIDPARAM;
@@ -670,7 +646,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_SetProperty(XInputDevice* self, const MY
 
     if (g == DIPROP_DEADZONE) {
         const DIPROPDWORD* pd = (const DIPROPDWORD*)h;
-        di_log("XInputDevice: SetProperty DIPROP_DEADZONE obj=%lu how=%lu val=%lu",
+        shim_log("XInputDevice: SetProperty DIPROP_DEADZONE obj=%lu how=%lu val=%lu",
                hdr->dwObj, hdr->dwHow, pd->dwData);
         if (hdr->dwSize != sizeof(DIPROPDWORD) || pd->dwData > 10000)
             return DIERR_INVALIDPARAM;
@@ -686,18 +662,18 @@ static HRESULT_T STDMETHODCALLTYPE xdev_SetProperty(XInputDevice* self, const MY
         return DI_OK;
     }
 
-    di_log("XInputDevice: SetProperty(prop=%lu)", IS_DIPROP(g) ? (unsigned long)(uintptr_t)g : 0);
+    shim_log("XInputDevice: SetProperty(prop=%lu)", IS_DIPROP(g) ? (unsigned long)(uintptr_t)g : 0);
     return E_NOTIMPL_T;
 }
 
 static HRESULT_T STDMETHODCALLTYPE xdev_Acquire(XInputDevice* self) {
     self->acquired = TRUE;
-    di_log("XInputDevice: acquired (user %lu)", self->user_index);
+    shim_log("XInputDevice: acquired (user %lu)", self->user_index);
     return DI_OK;
 }
 
 static HRESULT_T STDMETHODCALLTYPE xdev_Unacquire(XInputDevice* self) {
-    di_log("XInputDevice: Unacquire");
+    shim_log("XInputDevice: Unacquire");
     release_synthetic_input(&self->synthetic);
     self->acquired = FALSE;
     return DI_OK;
@@ -706,7 +682,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_Unacquire(XInputDevice* self) {
 static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceState(XInputDevice* self, DWORD cbData, void* lpvData) {
     /* Only log first call to avoid flooding */
     static int logged = 0;
-    if (!logged) { di_log("XInputDevice: GetDeviceState(size=%lu) [first call]", cbData); logged = 1; }
+    if (!logged) { shim_log("XInputDevice: GetDeviceState(size=%lu) [first call]", cbData); logged = 1; }
     if (!lpvData) return DIERR_INVALIDPARAM;
     if (!self->acquired) {
         release_synthetic_input(&self->synthetic);
@@ -734,7 +710,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceState(XInputDevice* self, DWORD
 }
 
 static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceData(XInputDevice* s, DWORD a, void* b, DWORD* c, DWORD d) {
-    di_log("XInputDevice: GetDeviceData");
+    shim_log("XInputDevice: GetDeviceData");
     (void)s; (void)a; (void)b; (void)d;
     if (c) *c = 0;
     return DI_OK;
@@ -743,7 +719,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceData(XInputDevice* s, DWORD a, 
 static HRESULT_T STDMETHODCALLTYPE xdev_SetDataFormat(XInputDevice* self, const DIDATAFORMAT* df) {
     if (!df) return DIERR_INVALIDPARAM;
     (void)self;
-    di_log("XInputDevice: SetDataFormat size=%lu", df->dwDataSize);
+    shim_log("XInputDevice: SetDataFormat size=%lu", df->dwDataSize);
     return DI_OK;
 }
 
@@ -754,7 +730,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_SetEventNotification(XInputDevice* s, HA
 
 static HRESULT_T STDMETHODCALLTYPE xdev_SetCooperativeLevel(XInputDevice* s, HWND hw, DWORD fl) {
     s->hwnd = hw;
-    di_log("XInputDevice: SetCooperativeLevel flags=0x%lx", fl);
+    shim_log("XInputDevice: SetCooperativeLevel flags=0x%lx", fl);
     (void)fl;
     return DI_OK;
 }
@@ -782,7 +758,7 @@ static HRESULT_T fill_xinput_device_info(DIDEVICEINSTANCEA* info) {
 }
 
 static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceInfo(XInputDevice* s, void* a) {
-    di_log("XInputDevice: GetDeviceInfo");
+    shim_log("XInputDevice: GetDeviceInfo");
     (void)s;
     return fill_xinput_device_info((DIDEVICEINSTANCEA*)a);
 }
@@ -827,7 +803,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_Escape(XInputDevice* s, void* a) {
 }
 static HRESULT_T STDMETHODCALLTYPE xdev_Poll(XInputDevice* s) {
     static int logged = 0;
-    if (!logged) { di_log("XInputDevice: Poll [first call]"); logged = 1; }
+    if (!logged) { shim_log("XInputDevice: Poll [first call]"); logged = 1; }
     (void)s;
     return DI_OK;
 }
@@ -889,7 +865,7 @@ static XInputDevice* xinput_device_create(DWORD user_index) {
         dev->axes[i].range_max = 1000;
         dev->axes[i].deadzone_pct = (THUMB_DEADZONE * 10000UL) / 32767UL;
     }
-    di_log("XInputDevice: created (user %lu)", user_index);
+    shim_log("XInputDevice: created (user %lu)", user_index);
     return dev;
 }
 
@@ -962,7 +938,7 @@ static ULONG STDMETHODCALLTYPE wdi_Release(WrappedDI* self) {
         /* Release the real interface */
         typedef ULONG (STDMETHODCALLTYPE* FnRelease)(void*);
         ((FnRelease)REAL_VTBL(self)[DI_VTBL_RELEASE])(self->real_di);
-        di_log("WrappedDI: destroyed");
+        shim_log("WrappedDI: destroyed");
         HeapFree(GetProcessHeap(), 0, self->vtbl);
         HeapFree(GetProcessHeap(), 0, self);
     }
@@ -975,7 +951,7 @@ static HRESULT_T STDMETHODCALLTYPE wdi_CreateDevice(WrappedDI* self, const MY_GU
 
     /* Intercept our synthetic XInput GUID */
     if (guid_eq(rguid, &GUID_XInputPad)) {
-        di_log("CreateDevice: XInput pad requested — creating virtual device");
+        shim_log("CreateDevice: XInput pad requested — creating virtual device");
         XInputDevice* xdev = xinput_device_create(0);  /* player 1 */
         if (!xdev) return DIERR_INVALIDPARAM;
         *ppDevice = xdev;
@@ -1002,19 +978,19 @@ static HRESULT_T STDMETHODCALLTYPE wdi_EnumDevices(WrappedDI* self, DWORD devTyp
         if (g_XInputGetState && !(dwFlags & DIEDFL_FORCEFEEDBACK)) {
             XINPUT_STATE xs;
             if (g_XInputGetState(0, &xs) == 0) {
-                di_log("EnumDevices: injecting XInput controller as primary device");
+                shim_log("EnumDevices: injecting XInput controller as primary device");
                 DIDEVICEINSTANCEA di;
                 memset(&di, 0, sizeof(di));
                 di.dwSize = sizeof(di);
                 fill_xinput_device_info(&di);
                 if (callback(&di, pvRef) == DIENUM_STOP) {
-                    di_log("EnumDevices: callback returned STOP after XInput injection");
+                    shim_log("EnumDevices: callback returned STOP after XInput injection");
                     return DI_OK;
                 }
                 injected = TRUE;
             }
         } else if (dwFlags & DIEDFL_FORCEFEEDBACK) {
-            di_log("EnumDevices: skipping XInput pad (FF-only filter)");
+            shim_log("EnumDevices: skipping XInput pad (FF-only filter)");
         }
 
         /* For joystick-only queries, skip real DI7 enumeration entirely —
@@ -1026,7 +1002,7 @@ static HRESULT_T STDMETHODCALLTYPE wdi_EnumDevices(WrappedDI* self, DWORD devTyp
 
     /* Forward non-joystick enumeration (keyboard, mouse, all) to real DI */
     HRESULT_T hr = ((FnEnum)REAL_VTBL(self)[DI_VTBL_ENUMDEVICES])(self->real_di, devType, callback, pvRef, dwFlags);
-    di_log("EnumDevices: real call returned hr=0x%08lx (type=%lu)", (unsigned long)hr, devType);
+    shim_log("EnumDevices: real call returned hr=0x%08lx (type=%lu)", (unsigned long)hr, devType);
 
     return hr;
 }
@@ -1095,7 +1071,7 @@ static WrappedDI* wrap_directinput(void* real_di, DWORD interface_level) {
     w->real_di = real_di;
     w->interface_level = interface_level;
 
-    di_log("WrappedDI: created (real=%p)", real_di);
+    shim_log("WrappedDI: created (real=%p)", real_di);
     return w;
 }
 
@@ -1124,7 +1100,7 @@ static BOOL load_real_dinput(void) {
     g_real_DirectInputCreateW = (PFN_DirectInputCreateW)GetProcAddress(g_real_dinput, "DirectInputCreateW");
     g_real_DirectInputCreateEx = (PFN_DirectInputCreateEx)GetProcAddress(g_real_dinput, "DirectInputCreateEx");
 
-    di_log("Real dinput.dll loaded from system (%p)", (void*)g_real_dinput);
+    shim_log("Real dinput.dll loaded from system (%p)", (void*)g_real_dinput);
     return g_real_DirectInputCreateA != NULL;
 }
 
@@ -1135,9 +1111,9 @@ static void load_xinput(void) {
     if (!g_xinput) g_xinput = load_system_library(L"xinput9_1_0.dll");
     if (g_xinput) {
         g_XInputGetState = (PFN_XInputGetState)GetProcAddress(g_xinput, "XInputGetState");
-        di_log("XInput loaded (%p), GetState=%p", (void*)g_xinput, (void*)g_XInputGetState);
+        shim_log("XInput loaded (%p), GetState=%p", (void*)g_xinput, (void*)g_XInputGetState);
     } else {
-        di_log("XInput NOT available — no gamepad support");
+        shim_log("XInput NOT available — no gamepad support");
     }
 }
 
@@ -1145,7 +1121,7 @@ static void load_xinput(void) {
 
 __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateA(HINSTANCE hinst, DWORD version,
                                                            void** ppDI, void* pUnkOuter) {
-    di_log("DirectInputCreateA(version=0x%lx)", version);
+    shim_log("DirectInputCreateA(version=0x%lx)", version);
     if (!ppDI) return DIERR_INVALIDPARAM;
     *ppDI = NULL;
     if (!load_real_dinput()) return DIERR_NOTINITIALIZED;
@@ -1154,7 +1130,7 @@ __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateA(HINSTANCE hinst, DWORD
     void* real_di = NULL;
     HRESULT_T hr = g_real_DirectInputCreateA(hinst, version, &real_di, pUnkOuter);
     if (hr != DI_OK || !real_di) {
-        di_log("DirectInputCreateA: real call failed (0x%08lx)", (unsigned long)hr);
+        shim_log("DirectInputCreateA: real call failed (0x%08lx)", (unsigned long)hr);
         return hr;
     }
 
@@ -1169,7 +1145,7 @@ __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateA(HINSTANCE hinst, DWORD
 
 __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateW(HINSTANCE hinst, DWORD version,
                                                            void** ppDI, void* pUnkOuter) {
-    di_log("DirectInputCreateW(version=0x%lx)", version);
+    shim_log("DirectInputCreateW(version=0x%lx)", version);
     if (!ppDI) return DIERR_INVALIDPARAM;
     if (!load_real_dinput()) return DIERR_NOTINITIALIZED;
     if (!g_real_DirectInputCreateW) return DIERR_NOTINITIALIZED;
@@ -1180,7 +1156,7 @@ __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateW(HINSTANCE hinst, DWORD
 __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateEx(HINSTANCE hinst, DWORD version,
                                                             const MY_IID* riid, void** ppvOut,
                                                             void* pUnkOuter) {
-    di_log("DirectInputCreateEx(version=0x%lx)", version);
+    shim_log("DirectInputCreateEx(version=0x%lx)", version);
     if (!riid || !ppvOut) return DIERR_INVALIDPARAM;
     *ppvOut = NULL;
     if (!load_real_dinput()) return DIERR_NOTINITIALIZED;

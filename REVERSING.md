@@ -73,13 +73,13 @@ FUN_00493960():
 
 | Index | Offset | Method | Intercepted? |
 |-------|--------|--------|--------------|
-| 0 | `+0x00` | `QueryInterface` | Yes (QI routing) |
-| 1 | `+0x04` | `AddRef` | Yes (ref counting) |
-| 2 | `+0x08` | `Release` | Yes (cleanup) |
+| 0 | `+0x00` | `QueryInterface` | Forwarded |
+| 1 | `+0x04` | `AddRef` | Forwarded |
+| 2 | `+0x08` | `Release` | Forwarded |
 | 3 | `+0x0c` | `Compact` | Forwarded |
 | 4 | `+0x10` | `CreateClipper` | Forwarded |
 | 5 | `+0x14` | `CreatePalette` | Forwarded |
-| 6 | `+0x18` | `CreateSurface` | **YES** — Surface caps fix |
+| 6 | `+0x18` | `CreateSurface` | Forwarded |
 | 7 | `+0x1c` | `DuplicateSurface` | Forwarded |
 | 8 | `+0x20` | `EnumDisplayModes` | Forwarded |
 | 9 | `+0x24` | `EnumSurfaces` | Forwarded |
@@ -93,8 +93,8 @@ FUN_00493960():
 | 17 | `+0x44` | `GetVerticalBlankStatus` | Forwarded |
 | 18 | `+0x48` | `Initialize` | Forwarded |
 | 19 | `+0x4c` | `RestoreDisplayMode` | Forwarded |
-| 20 | `+0x50` | `SetCooperativeLevel` | **YES** — Exclusive mode handling |
-| 21 | `+0x54` | `SetDisplayMode` | **YES** — 16bpp→32bpp coercion |
+| 20 | `+0x50` | `SetCooperativeLevel` | **YES** — records the game window |
+| 21 | `+0x54` | `SetDisplayMode` | **YES** — 2x window at 640x480 |
 | 22 | `+0x58` | `WaitForVerticalBlank` | Forwarded |
 | 23 | `+0x5c` | `GetAvailableVidMem` | Forwarded |
 | 24 | `+0x60` | `GetSurfaceFromDC` | Forwarded |

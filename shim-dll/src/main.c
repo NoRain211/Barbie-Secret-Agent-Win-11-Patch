@@ -12,6 +12,7 @@ static HMODULE g_real_ddraw = NULL;
 static HMODULE g_advapi = NULL;
 static bool g_exports_ready = false;
 static bool g_registry_hooks_ready = false;
+bool g_using_dgvoodoo = false;
 
 typedef LONG (WINAPI* PFN_RegOpenKeyExA)(HKEY, LPCSTR, DWORD, REGSAM, PHKEY);
 typedef LONG (WINAPI* PFN_RegQueryValueExA)(HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
@@ -165,8 +166,15 @@ static bool resolve_real_ddraw(void) {
       if (wcscpy_s(dll_path, MAX_PATH, exe_path) == 0 &&
           wcscat_s(dll_path, MAX_PATH, L"dgVoodoo_ddraw.dll") == 0) {
         g_real_ddraw = LoadLibraryW(dll_path);
-        if (g_real_ddraw != NULL) {
+        if (g_real_ddraw != NULL &&
+            GetProcAddress(g_real_ddraw, "DirectDrawCreateEx") != NULL) {
+          g_using_dgvoodoo = true;
           return true;
+        }
+        if (g_real_ddraw != NULL) {
+          shim_log("ddraw backend: dgVoodoo_ddraw.dll lacks DirectDrawCreateEx; using system ddraw");
+          FreeLibrary(g_real_ddraw);
+          g_real_ddraw = NULL;
         }
       }
     }

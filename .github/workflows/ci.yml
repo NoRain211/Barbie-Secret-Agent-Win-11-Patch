@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Launcher vet and tests
+        working-directory: launcher
+        run: |
+          go vet ./...
+          go test ./...
+
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: MINGW32
+          install: mingw-w64-i686-gcc mingw-w64-i686-make
+
+      # The widescreen probe needs the game executable and skips itself here.
+      - name: Shim build and probes
+        working-directory: shim-dll
+        run: |
+          $env:PATH = "${{ steps.msys2.outputs.msys2-location }}\mingw32\bin;$env:PATH"
+          mingw32-make all test

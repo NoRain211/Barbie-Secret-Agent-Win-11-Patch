@@ -32,9 +32,6 @@ The game was built for Windows 95/98 using DirectX 7 (DirectDraw + Direct3D 7). 
 |---------|---------|---------|
 | Missing registry keys | Instant crash (access violation) | IAT hook returns hardcoded defaults |
 | CD-ROM drive check | "Please insert CD-ROM" error | Fake `GetDriveTypeA` / `GetVolumeInformationA` |
-| DDraw exclusive mode + DWM | Black screen | `SetAppCompatData(12, 0)` disables DWM maximized windowed mode |
-| 16bpp display modes | "Not implemented" error | Coerce 16bpp requests to 32bpp |
-| D3D7 surface memory flags | CreateSurface fails | Strip SYSTEMMEMORY from primary, force on Z-buffer (non-dgVoodoo path) |
 | DDraw/D3D7 rendering | Black screen, pixel format issues | Chain through dgVoodoo2 for DDraw/D3D7 to D3D11 translation |
 | Fixed 640x480 rendering | Stretched or pillarboxed 4:3 output | Patch native resolution, aspect ratio, and both camera FOV paths |
 
@@ -57,8 +54,8 @@ SecretAgent.exe
     |   +-- Loads "dgVoodoo_ddraw.dll" (dgVoodoo2, renamed)
     |   |   (DDraw/D3D7 -> D3D11 rendering translation)
     |   |
-    |   +-- Wraps IDirectDraw7 in proxy COM object
-    |       (intercepts SetCooperativeLevel, SetDisplayMode, CreateSurface)
+    |   +-- Hooks IDirectDraw7 SetCooperativeLevel / SetDisplayMode
+    |       (2x window at the original resolution in windowed mode)
     |
     +-- D3DImm.dll (dgVoodoo2 Direct3D immediate mode)
 ```
@@ -87,6 +84,9 @@ mingw32-make test
 
 The default Makefile build enables `SHIM_DEBUG` so release DLLs write
 `ddraw_proxy.log` and `dinput_proxy.log` during support triage.
+The widescreen probe in `mingw32-make test` runs only when
+`game-files/SecretAgent.exe` exists. The `dgVoodoo.conf` shipped in releases
+is kept in `config/`.
 
 ## Project Structure
 
@@ -105,14 +105,17 @@ barbie-secret-agent-re/
 +-- shim-dll/
 |   +-- src/
 |   |   +-- main.c        # DllMain, export forwarders, registry + CD-ROM hooks
-|   |   +-- ddraw_proxy.c # IDirectDraw7 COM proxy wrapper
+|   |   +-- ddraw_proxy.c # DirectDrawCreateEx hook and windowed sizing
 |   |   +-- widescreen_fix.c # Native resolution/aspect/FOV patch
+|   |   +-- menu_fix.c    # UI scaling, cursor, and HD_UI menu overrides
 |   |   +-- dinput_main.c # DirectInput/XInput controller bridge
 |   +-- include/
-|   |   +-- vtable_offsets.h  # DDraw/D3D vtable constants
+|   |   +-- shim_util.h      # Code-patching and game-path helpers
 |   |   +-- shim_log.h       # Logging utilities
 |   +-- tests/            # Native shim regression probes
 |   +-- ddraw.def         # DDraw export definitions
++-- config/
+|   +-- dgVoodoo.conf     # Release dgVoodoo2 configuration
 +-- launcher/             # Go/WebView2 settings launcher
 +-- README.md             # This file
 +-- TECHNICAL.md          # Deep technical documentation

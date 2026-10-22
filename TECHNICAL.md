@@ -9,7 +9,7 @@ The shim solves startup/runtime blockers while keeping original game binaries un
 1. Proxy all `ddraw.dll` exports expected by `SecretAgent.exe`
 2. Virtualize missing registry values under `HKLM\SOFTWARE\Gigawatt Studios\...`
 3. Bypass physical CD-ROM checks
-4. Intercept critical IDirectDraw7 calls for modern Windows compatibility
+4. Hook the IDirectDraw7 calls that size the windowed game
 5. Chain into dgVoodoo2 for DDraw/D3D7 to D3D11 translation
 
 ## Runtime Architecture
@@ -20,8 +20,8 @@ SecretAgent.exe
     -> IAT hooks (ADVAPI32 + KERNEL32)
     -> DirectDrawCreateEx wrapper
       -> dgVoodoo_ddraw.dll (preferred) OR system ddraw.dll
-      -> ProxyIDirectDraw7 (30-method COM vtable forwarder)
-        -> intercept SetCooperativeLevel / SetDisplayMode / CreateSurface
+      -> in-place vtable hooks on dgVoodoo2's IDirectDraw7
+        -> SetCooperativeLevel / SetDisplayMode
 ```
 
 ### Key Files
@@ -33,18 +33,18 @@ SecretAgent.exe
   - registry and CD-ROM hook implementations
 - `shim-dll/src/ddraw_proxy.c`
   - `DirectDrawCreateEx` override
-  - `ProxyIDirectDraw7` wrapper with explicit 30 method forwarders
-  - compatibility behavior for cooperative mode/display mode/surfaces
-- `shim-dll/include/vtable_offsets.h`
-  - byte offsets for frequently targeted DD7 methods
+  - `SetCooperativeLevel` / `SetDisplayMode` vtable hooks
+- `shim-dll/include/shim_util.h`
+  - shared memory-write, jump-patch, and game-path helpers
 - `shim-dll/ddraw.def`
   - export map (ordinal-compatible proxy surface)
 
 ## Export Forwarding Layer
 
 `main.c` resolves the real backend DLL (`dgVoodoo_ddraw.dll` first, system
-fallback) on the first forwarded DirectDraw call, outside `DllMain`, and caches
-the exported symbols in `g_fn_*` pointers.
+fallback) on the first DirectDraw call, outside `DllMain`, and caches the
+exported symbols in `g_fn_*` pointers. A `dgVoodoo_ddraw.dll` without
+`DirectDrawCreateEx` is unloaded and the system DLL is used instead.
 
 - 22 exports are declared in `ddraw.def`
 - Critical exports fail-fast if missing:
@@ -63,42 +63,21 @@ Most exports use naked forwarding stubs (`DDRAW_FORWARDER` macro). `DllCanUnload
 logging is suspended during that patch, and backend DirectDraw/XInput DLLs are
 loaded lazily after process attachment to avoid loader-lock re-entry.
 
-## DirectDraw Proxy (COM Wrapper)
+## DirectDraw Hooks
 
-### Why full 30-method forwarders are required
+When dgVoodoo2 is the backend, `DirectDrawCreateEx` patches two entries of the
+returned `IDirectDraw7` vtable in place. dgVoodoo2 shares that vtable across
+objects, so it is patched once and later objects reuse the hooks.
 
-A naive copied vtable crashes because the game calls methods with `this = proxy`, while real methods expect `this = real IDirectDraw7 object`.
+- `SetCooperativeLevel` records the game window.
+- `SetDisplayMode` logs the mode. After a successful 640x480x16 mode, it
+  resizes the window to 1280x960 centered in the monitor work area, or keeps
+  the size when that window would not fit.
 
-`ddraw_proxy.c` defines explicit wrappers for all 30 IDirectDraw7 entries and always forwards with:
-
-- function pointer from `real_vtable[index]`
-- first arg swapped to `real_object`
-
-### Intercepted methods
-
-1. `SetCooperativeLevel`
-   - keeps requested flags (does not force NORMAL in final build)
-   - when `DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN` is requested, calls `SetAppCompatData(12, 0)` if available
-   - goal: reduce DWM fullscreen compatibility issues
-
-2. `SetDisplayMode`
-   - logs requested mode
-   - coerces 16bpp requests to 32bpp on modern systems
-   - keeps requested resolution in final dgVoodoo path
-   - fallback retry path still attempts `640x480x16` if primary call fails
-
-3. `CreateSurface`
-   - logs surface caps for diagnosis
-   - applies cap adjustments only when NOT chained through dgVoodoo2
-   - when dgVoodoo chain is active, adjustments are skipped to avoid conflicts
-
-### Surface adjustments (non-dgVoodoo fallback mode)
-
-- remove `DDSCAPS_SYSTEMMEMORY` from primary surface caps
-- enforce `DDSCAPS_SYSTEMMEMORY` on z-buffer
-- clear `DDSCAPS_VIDEOMEMORY` when forcing z-buffer system memory
-
-This addresses older D3D7 expectations on modern native ddraw paths.
+Earlier builds also wrapped the object to coerce 16bpp modes and adjust
+surface caps for the system DirectDraw path. Those fixes never ran under
+dgVoodoo2, and the system path still rendered a black screen, so they were
+removed. With the system DLL as backend, objects are returned unhooked.
 
 ## Native Widescreen Patch
 
@@ -122,14 +101,14 @@ AlphaYellow's MIT-licensed v1.4 fix; attribution is retained in
 
 ## dgVoodoo2 Chaining
 
-`load_real_ddraw_module()` behavior:
+`resolve_real_ddraw()` in `main.c`:
 
 1. Compute executable directory
 2. Try loading `dgVoodoo_ddraw.dll` from game directory
-3. Resolve `DirectDrawCreateEx`; if present, set `g_using_dgvoodoo_chain = true`
-4. If not available, fallback to `C:\Windows\SysWOW64\ddraw.dll` then `System32`
+3. Resolve `DirectDrawCreateEx`; if present, set `g_using_dgvoodoo = true`
+4. Otherwise load `ddraw.dll` from the system directory (`SysWOW64` for this 32-bit process)
 
-When `g_using_dgvoodoo_chain` is true, shim disables surface-cap rewriting and lets dgVoodoo2 fully own render translation.
+The release configuration is `config/dgVoodoo.conf`.
 
 ## Registry Virtualization
 
@@ -226,7 +205,9 @@ gcc -m32 -shared -DINITGUID -DSHIM_DEBUG \
 
 ### Makefile
 
-`shim-dll/Makefile` provides a simpler default build (`CC=gcc`, `-m32`, shared output, `SHIM_DEBUG` enabled). Run `mingw32-make test` to build both DLLs and execute the registry-hook, DirectInput logic, and black-box DDraw/DInput ABI probes.
+`shim-dll/Makefile` provides a simpler default build (`CC=gcc`, `-m32`, shared output, `SHIM_DEBUG` enabled). Its recipes run in `cmd.exe`. Run `mingw32-make test` to build both DLLs and execute the registry-hook, DirectInput logic, menu-fix, and black-box DDraw/DInput ABI probes. The widescreen probe also runs when `game-files/SecretAgent.exe` is present. GitHub Actions runs the same suite plus the launcher tests.
+
+Building with `-DMENU_FIX_DUMP_TEXTURES` makes the shim write the main-menu tiles to `HD_UI\Extracted` for the `tools/` scripts. Release builds only read `HD_UI\Override` from the game folder.
 
 ## Operational Notes
 
