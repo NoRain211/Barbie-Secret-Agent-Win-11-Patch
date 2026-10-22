@@ -298,23 +298,15 @@ static bool query_secretagent_default_value(const char* value_name, LPBYTE data,
       return true;
     }
 
-    if (data_len == NULL) {
-      SetLastError(ERROR_INVALID_PARAMETER);
-      return false;
-    }
-
     size_t len = strlen(defaults[i].string_value) + 1;
-    if (*data_len < (DWORD)len) {
+    if (data != NULL && *data_len < (DWORD)len) {
       *data_len = (DWORD)len;
       SetLastError(ERROR_MORE_DATA);
       return false;
     }
     if (data != NULL) {
       memcpy(data, defaults[i].string_value, len);
-      *data_len = (DWORD)len;
-      return true;
     }
-
     *data_len = (DWORD)len;
     return true;
   }
@@ -370,13 +362,19 @@ static LONG WINAPI hooked_RegQueryValueExA(HKEY hKey, LPCSTR lpValueName,
                                           LPBYTE lpData, LPDWORD lpcbData) {
   (void)lpReserved;
 
-  if (g_fn_RegQueryValueExA == NULL || lpcbData == NULL || lpValueName == NULL) {
+  if (g_fn_RegQueryValueExA == NULL) {
     return ERROR_PROC_NOT_FOUND;
   }
 
-  if (is_redirected_key(hKey)) {
+  if (is_redirected_key(hKey) && lpValueName != NULL) {
+    /* A NULL size with NULL data is a valid existence check. */
+    DWORD size_only = 0;
+    if (lpcbData == NULL && lpData != NULL) {
+      return ERROR_INVALID_PARAMETER;
+    }
     shim_log("RegQueryValueExA: intercepted query for '%s'", lpValueName);
-    if (query_secretagent_default_value(lpValueName, lpData, lpcbData)) {
+    if (query_secretagent_default_value(lpValueName, lpData,
+                                        lpcbData != NULL ? lpcbData : &size_only)) {
       if (lpType != NULL) {
         if (_stricmp(lpValueName, "SETUP") == 0) {
           *lpType = REG_DWORD;
@@ -390,9 +388,9 @@ static LONG WINAPI hooked_RegQueryValueExA(HKEY hKey, LPCSTR lpValueName,
     if (GetLastError() == ERROR_MORE_DATA) {
       return ERROR_MORE_DATA;
     }
-    if (is_fake_registry_handle(hKey)) {
-      return ERROR_FILE_NOT_FOUND;
-    }
+  }
+  if (is_fake_registry_handle(hKey)) {
+    return ERROR_FILE_NOT_FOUND;
   }
 
   return g_fn_RegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);

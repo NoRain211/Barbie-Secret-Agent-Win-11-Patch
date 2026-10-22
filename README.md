@@ -10,7 +10,8 @@ The game is verified playable from start to finish with this patch.
 2. Download the latest release zip and extract these files into the game folder
    alongside `SecretAgent.exe`:
    - `ddraw.dll` — our compatibility proxy
-   - `dinput.dll` — optional Xbox/XInput controller bridge for the game's native DirectInput support
+   - `dinput.dll` — optional gamepad bridge for the game's native DirectInput support
+   - `SDL3.dll` — SDL3 runtime used by `dinput.dll` for gamepads (from [SDL 3.4.18](https://github.com/libsdl-org/SDL/releases/tag/release-3.4.18), win32-x86)
    - `dgVoodoo_ddraw.dll` — dgVoodoo2 DDraw wrapper (from [dgVoodoo2 v2.86.5](https://github.com/dege-diosg/dgVoodoo2/releases))
    - `D3DImm.dll` — dgVoodoo2 Direct3D wrapper
    - `D3D8.dll` and `D3D9.dll` — dgVoodoo2 runtime companions
@@ -68,7 +69,7 @@ SecretAgent.exe
 - Keyboard and mouse controls
 - Alt+Tab recovery
 - Native widescreen rendering with corrected Hor+ camera FOV
-- Native gamepad support through the DirectInput/XInput shim
+- Native gamepad support through the DirectInput/SDL3 shim
 - Full game completion from start to finish
 - No admin rights required
 
@@ -108,7 +109,7 @@ barbie-secret-agent-re/
 |   |   +-- ddraw_proxy.c # DirectDrawCreateEx hook and windowed sizing
 |   |   +-- widescreen_fix.c # Native resolution/aspect/FOV patch
 |   |   +-- menu_fix.c    # UI scaling, cursor, and HD_UI menu overrides
-|   |   +-- dinput_main.c # DirectInput/XInput controller bridge
+|   |   +-- dinput_main.c # DirectInput/SDL3 gamepad bridge
 |   +-- include/
 |   |   +-- shim_util.h      # Code-patching and game-path helpers
 |   |   +-- shim_log.h       # Logging utilities
@@ -117,6 +118,7 @@ barbie-secret-agent-re/
 +-- config/
 |   +-- dgVoodoo.conf     # Release dgVoodoo2 configuration
 +-- launcher/             # Go/WebView2 settings launcher
++-- tools/                # Main-menu HD_UI tile reconstruction scripts
 +-- README.md             # This file
 +-- TECHNICAL.md          # Deep technical documentation
 +-- REVERSING.md          # Reverse engineering findings
@@ -149,8 +151,10 @@ Cutscene letterboxing may differ outside 4:3. See the validation limits in
 ## Gamepad Support
 
 The game has native DirectInput gamepad support. The `dinput.dll`
-shim exposes modern Xbox/XInput controllers through the legacy DirectInput
-path so the game's own controller support can be used on Windows 10/11.
+shim uses SDL3 to expose the first connected Xbox, PlayStation, Switch, or
+generic controller through the legacy DirectInput path, so the game's own
+controller support works on Windows 10/11. `SDL3.dll` must sit beside
+`SecretAgent.exe`; without it the shim leaves DirectInput unchanged.
 
 External mappers such as AntiMicroX, JoyToKey, or Steam Input are fallback
 options only if a specific controller does not behave correctly.

@@ -60,7 +60,7 @@ exported symbols in `g_fn_*` pointers. A `dgVoodoo_ddraw.dll` without
 Most exports use naked forwarding stubs (`DDRAW_FORWARDER` macro). `DllCanUnloadNow` and `DllGetClassObject` use typed wrappers to avoid signature conflicts.
 
 `DllMain` performs only the timing-sensitive main-executable IAT patch. File
-logging is suspended during that patch, and backend DirectDraw/XInput DLLs are
+logging is suspended during that patch, and backend DirectDraw/SDL3 DLLs are
 loaded lazily after process attachment to avoid loader-lock re-entry.
 
 ## DirectDraw Hooks
@@ -192,17 +192,6 @@ API so diagnostics do not change shutdown behavior.
 
 ## Build and Artifacts
 
-### Build command used for validated binary
-
-```bash
-gcc -m32 -shared -DINITGUID -DSHIM_DEBUG \
-  -o build/ddraw.dll \
-  src/main.c src/ddraw_proxy.c \
-  -Iinclude -lole32 -luuid \
-  -Wall -Wextra ddraw.def \
-  -Wl,--enable-stdcall-fixup
-```
-
 ### Makefile
 
 `shim-dll/Makefile` provides a simpler default build (`CC=gcc`, `-m32`, shared output, `SHIM_DEBUG` enabled). Its recipes run in `cmd.exe`. Run `mingw32-make test` to build both DLLs and execute the registry-hook, DirectInput logic, menu-fix, and black-box DDraw/DInput ABI probes. The widescreen probe also runs when `game-files/SecretAgent.exe` is present. GitHub Actions runs the same suite plus the launcher tests.
@@ -211,7 +200,6 @@ Building with `-DMENU_FIX_DUMP_TEXTURES` makes the shim write the main-menu tile
 
 ## Operational Notes
 
-- `setup.cmd` in `game-files/` copies the latest shim build into the game folder and launches `SecretAgent.exe`
 - Final working deployment uses both:
   - `ddraw.dll` (this project)
   - `dgVoodoo_ddraw.dll` + dgVoodoo companion DLLs (`D3DImm.dll`, `D3D8.dll`, `D3D9.dll`)
@@ -219,7 +207,7 @@ Building with `-DMENU_FIX_DUMP_TEXTURES` makes the shim write the main-menu tile
 ## Known Limits / Future Improvements
 
 1. Logging is still verbose (debug-friendly, not release-minimal)
-2. The XInput bridge exposes player 1 as the legacy joystick; additional local players are not currently enumerated
+2. The SDL3 bridge exposes the first connected gamepad as the legacy joystick; additional local players are not currently enumerated
 3. Save-file format tooling is out of scope for this shim and requires separate reverse engineering
 
 ## Validation Outcome
@@ -231,3 +219,71 @@ Core compatibility goals are met in live testing:
 - sound and cutscenes work
 - New York and Tokyo levels validated
 - Alt+Tab recovers (minor fullscreen capture quirk remains cosmetic)
+
+## Gamepad Bridge
+
+`dinput_main.c` wraps `IDirectInputA` through `IDirectInput7A`. On the first
+`DirectInputCreate*` call it loads `SDL3.dll` from the game folder, calls
+`SDL_Init(SDL_INIT_GAMEPAD)`, and disables SDL gamepad events because nothing in
+the process pumps them. Each poll calls `SDL_UpdateGamepads` and reads the first
+connected gamepad, reopening another one after a disconnect.
+
+- Joystick enumeration lists a virtual "Xbox Controller" first when SDL sees a
+  gamepad, so Xbox, PlayStation, Switch, and generic controllers all reach the
+  game's native DirectInput joystick code.
+- SDL state is converted to an XInput-layout pad (Y up-positive, triggers
+  0..255) before the existing `DIJOYSTATE` mapping.
+- While the game window has focus, the right stick moves the cursor at
+  900 px/s at full deflection regardless of poll rate. A sends Space, Start
+  sends Escape, and B, X, or a pressed right trigger send a left click.
+- Without `SDL3.dll`, or if `SDL_Init` fails, DirectInput is forwarded
+  unchanged and the reason is logged in `dinput_proxy.log`.
+
+## Reusing This Approach
+
+The same structure works for other pre-2005 Windows games:
+
+```text
+Game.exe
+  -> proxy DLL named after the API DLL the game imports
+    -> rendering wrapper, renamed (dgVoodoo2, DDrawCompat, dxwrapper, cnc-ddraw)
+      -> system DLL as fallback
+    -> IAT hooks for registry, CD-ROM, and DRM checks
+    -> in-place vtable hooks for the few COM methods that need changes
+```
+
+1. List the imports (`objdump -p Game.exe`) to find the API era.
+
+   | DLL | API | Wrapper |
+   |-----|-----|---------|
+   | `DDRAW.dll` | DirectDraw / Direct3D 1-7 | dgVoodoo2, DDrawCompat, dxwrapper, cnc-ddraw |
+   | `D3D8.dll` | Direct3D 8 | dgVoodoo2, d3d8to9 |
+   | `D3D9.dll` | Direct3D 9 | dxwrapper, dgVoodoo2 |
+   | `DINPUT.dll` | DirectInput 1-7 | dinputto8, or a proxy like this one |
+   | `GLIDE2X.dll` / `GLIDE3X.dll` | 3dfx Glide | nGlide, dgVoodoo2 |
+   | `WINMM.dll`, `DSOUND.dll`, `OPENGL32.dll` | MCI, DirectSound, OpenGL | usually native |
+
+2. Classify the first failure: an instant crash usually means missing registry
+   data or a missing DLL, an "insert CD" dialog means a drive check, and a black
+   screen with audio means the renderer needs a wrapper.
+3. Trace it in Ghidra (GhidrAssistMCP lets agents query it), x32dbg, and
+   Process Monitor. Start from the API entry point, error strings, and
+   registry paths.
+4. Build the proxy: forward exports through stubs that tolerate missing
+   optional exports, patch the IAT in `DllMain`, and load backends lazily
+   outside the loader lock.
+5. Iterate with logging, fixing one error per launch.
+
+Pitfalls learned here:
+
+- Hook both `ExitProcess` and `TerminateProcess` and log the return address;
+  look it up in Ghidra to find the failing function.
+- Log every IAT patch, because a missed import fails silently.
+- When neither HKCU nor HKLM has the game's key, serve defaults through a fake
+  registry handle.
+- A wrapper object must forward every method with the real `this` pointer.
+  Patching the few needed slots of the real vtable once is simpler.
+- Let the rendering wrapper own surface memory and pixel formats. Fixes such as
+  16bpp coercion or surface-cap rewrites only matter on native DirectDraw.
+- Do not downgrade `SetCooperativeLevel` to `DDSCL_NORMAL`; back buffers then
+  fail with `DDERR_NOEXCLUSIVEMODE`.

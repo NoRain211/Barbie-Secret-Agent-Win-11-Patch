@@ -653,8 +653,16 @@ static void* scaled_vertex_copy(DWORD fvf, const void* vertices,
   }
 
   size_t size = stride * vertex_count;
-  uint8_t* copy = (uint8_t*)malloc(size);
-  if (copy == NULL) return NULL;
+  /* shortcut: one reused buffer assumes the game draws UI from one thread; lock it if that changes. */
+  static uint8_t* buffer = NULL;
+  static size_t capacity = 0;
+  if (size > capacity) {
+    uint8_t* grown = (uint8_t*)realloc(buffer, size);
+    if (grown == NULL) return NULL;
+    buffer = grown;
+    capacity = size;
+  }
+  uint8_t* copy = buffer;
   memcpy(copy, vertices, size);
 
   float anchor_x = 0.0f;
@@ -890,7 +898,6 @@ static HRESULT draw_menu_primitive(void* return_address, IDirect3DDevice7* devic
                                  scaled != NULL ? scaled : vertices,
                                  vertex_count, indexed, indices, index_count,
                                  flags);
-  free(scaled);
   return result;
 }
 

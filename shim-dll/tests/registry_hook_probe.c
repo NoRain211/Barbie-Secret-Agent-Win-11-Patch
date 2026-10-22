@@ -203,6 +203,28 @@ int main(int argc, char** argv) {
     goto cleanup;
   }
 
+  DWORD size_type = 0;
+  DWORD size_len = 0;
+  status = iat_RegQueryValueExA(opened_key, "PATH", NULL, &size_type, NULL, &size_len);
+  if (status != ERROR_SUCCESS || size_type != REG_SZ ||
+      size_len != strlen(expected_path) + 1) {
+    fprintf(stderr, "PATH size query returned %ld type=%lu len=%lu\n", status,
+            size_type, size_len);
+    goto cleanup;
+  }
+  status = iat_RegQueryValueExA(opened_key, "SETUP", NULL, NULL, NULL, NULL);
+  if (status != ERROR_SUCCESS) {
+    fprintf(stderr, "SETUP existence check returned %ld\n", status);
+    goto cleanup;
+  }
+  status = iat_RegQueryValueExA(HKEY_CURRENT_USER, "__shim_probe_unused__", NULL, NULL,
+                                NULL, NULL);
+  if (status != ERROR_FILE_NOT_FOUND) {
+    fprintf(stderr, "unrelated NULL-size query returned %ld; expected passthrough\n",
+            status);
+    goto cleanup;
+  }
+
   status = iat_RegOpenKeyExA(HKEY_LOCAL_MACHINE,
                              "SOFTWARE\\Gigawatt Studios\\MissingProduct",
                              0, KEY_READ, &fake_key);

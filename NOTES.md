@@ -31,7 +31,7 @@ Ideas, potential improvements, and research topics that came up during the proje
 
 ## Gamepad Support
 - Game has native DirectInput gamepad support
-- Current patch: `dinput.dll` exposes modern Xbox/XInput controllers through the legacy DirectInput path
+- Current patch: `dinput.dll` exposes the first SDL3 gamepad (Xbox, PlayStation, Switch, generic) through the legacy DirectInput path
 - AntiMicroX, JoyToKey, or Steam Input are fallback options for controller-specific issues
 
 ## Pak Archive Format
@@ -43,7 +43,7 @@ Ideas, potential improvements, and research topics that came up during the proje
 ## DirectInput Improvements
 - Game uses DISCL_EXCLUSIVE | DISCL_FOREGROUND
 - May cause input loss on Alt+Tab in some configurations
-- Current `dinput.dll` wrapper injects an XInput-backed virtual DirectInput joystick
+- Current `dinput.dll` wrapper injects an SDL3-backed virtual DirectInput joystick
 - Future work, if needed: focus-loss handling, controller selection, remapping, or a small diagnostics screen
 
 ## Audio Volume Normalization

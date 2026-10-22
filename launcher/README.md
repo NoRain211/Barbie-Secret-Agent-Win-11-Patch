@@ -38,7 +38,7 @@ launcher instead of closing the window.
 
 The launcher does not directly handle gamepad input. The game itself has native
 DirectInput gamepad support, and the patch's `dinput.dll` shim exposes modern
-Xbox/XInput controllers through that legacy path.
+controllers through that legacy path using SDL3.
 
 External mappers such as AntiMicroX, JoyToKey, or Steam Input are fallback
 options only if a specific controller does not behave correctly.

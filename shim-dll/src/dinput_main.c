@@ -1,8 +1,9 @@
 /*
- * dinput.dll proxy — XInput gamepad support for Secret Agent Barbie
+ * dinput.dll proxy — SDL3 gamepad support for Secret Agent Barbie
  *
  * Forwards keyboard/mouse DInput calls to real system dinput.dll.
- * Adds Xbox controller as a virtual DI7 joystick via XInput.
+ * Adds the first SDL3 gamepad (Xbox, PlayStation, Switch, generic) as a
+ * virtual DI7 joystick. SDL3.dll is loaded at runtime from the game folder.
  *
  * Build: gcc -m32 -shared -DINITGUID -o dinput.dll src/dinput_main.c
  *        -Iinclude -lole32 -luuid dinput.def -Wl,--enable-stdcall-fixup
@@ -21,7 +22,7 @@
 FILE* g_log_file = NULL;
 bool g_log_suspended = false;
 
-/* ── DInput / XInput types (avoid SDK headers) ────────────────────── */
+/* ── DInput / pad types (avoid SDK headers) ───────────────────────── */
 
 typedef struct { unsigned long Data1; unsigned short Data2, Data3; unsigned char Data4[8]; } MY_GUID;
 typedef MY_GUID MY_IID;
@@ -109,13 +110,11 @@ typedef struct {
     DWORD dwFFDriverVersion;
 } DIDEVCAPS;
 
-/* XInput types */
+/* Pad state in XInput layout (Y axes up-positive), filled from SDL3 */
 typedef struct { WORD wButtons; BYTE bLeftTrigger, bRightTrigger;
-                 SHORT sThumbLX, sThumbLY, sThumbRX, sThumbRY; } XINPUT_GAMEPAD;
-typedef struct { DWORD dwPacketNumber; XINPUT_GAMEPAD Gamepad; } XINPUT_STATE;
-typedef DWORD (WINAPI* PFN_XInputGetState)(DWORD, XINPUT_STATE*);
+                 SHORT sThumbLX, sThumbLY, sThumbRX, sThumbRY; } PadState;
 
-/* XInput button masks */
+/* PadState button masks (XInput values) */
 #define XBTN_DPAD_UP    0x0001
 #define XBTN_DPAD_DOWN  0x0002
 #define XBTN_DPAD_LEFT  0x0004
@@ -135,7 +134,7 @@ typedef DWORD (WINAPI* PFN_XInputGetState)(DWORD, XINPUT_STATE*);
 #define THUMB_DEADZONE  7849
 #define TRIGGER_DEADZONE 30
 
-/* Axis range config (used by XInputDevice and xinput_read_joystate) */
+/* Axis range config (used by GamepadDevice and pad_read_joystate) */
 typedef struct { LONG range_min, range_max; DWORD deadzone_pct; } AxisConfig;
 #define NUM_AXES 6
 
@@ -143,6 +142,9 @@ typedef struct {
     BOOL space_down;
     BOOL escape_down;
     BOOL mouse_left_down;
+    LARGE_INTEGER last_mouse_move;
+    float mouse_carry_x;
+    float mouse_carry_y;
 } SyntheticInputState;
 
 /* DInput callback types */
@@ -185,9 +187,9 @@ static const MY_GUID GUID_Button = {0xA36D02F0,0xC9F3,0x11CF,{0xBF,0xC7,0x44,0x4
 #define DIDFT_POV_       0x10  /* avoid conflict with POV hat value macros */
 #define DIDFT_MAKEINSTANCE(n) ((DWORD)(n) << 8)
 
-/* ── Synthetic GUID for our XInput device ─────────────────────────── */
+/* ── Synthetic GUID for our virtual gamepad ───────────────────────── */
 
-static const MY_GUID GUID_XInputPad = {
+static const MY_GUID GUID_VirtualGamepad = {
     0x584E5055, 0x5400, 0x0001,
     { 0x53, 0x41, 0x42, 0x41, 0x52, 0x42, 0x49, 0x45 }  /* "SABARBIE" */
 };
@@ -204,8 +206,6 @@ static const MY_GUID MY_IID_IUnknown    = { 0x00000000, 0x0000, 0x0000, {0xC0,0x
 /* ── Globals ──────────────────────────────────────────────────────── */
 
 static HMODULE g_real_dinput = NULL;
-static HMODULE g_xinput = NULL;
-static PFN_XInputGetState g_XInputGetState = NULL;
 
 typedef HRESULT_T (WINAPI* PFN_DirectInputCreateA)(HINSTANCE, DWORD, void**, void*);
 typedef HRESULT_T (WINAPI* PFN_DirectInputCreateW)(HINSTANCE, DWORD, void**, void*);
@@ -218,7 +218,142 @@ static int guid_eq(const MY_GUID* a, const MY_GUID* b) {
     return memcmp(a, b, sizeof(MY_GUID)) == 0;
 }
 
-/* ── Apply deadzone to XInput thumbstick ──────────────────────────── */
+/* ── SDL3 gamepad backend ─────────────────────────────────────────── */
+
+/* Declarations match the SDL 3.4 headers: __cdecl calls and a one-byte bool. */
+typedef struct SDL_Gamepad SDL_Gamepad;
+#define SDL_INIT_GAMEPAD 0x00002000u
+enum {
+    SDL_BUTTON_SOUTH, SDL_BUTTON_EAST, SDL_BUTTON_WEST, SDL_BUTTON_NORTH,
+    SDL_BUTTON_BACK, SDL_BUTTON_GUIDE, SDL_BUTTON_START, SDL_BUTTON_LEFT_STICK,
+    SDL_BUTTON_RIGHT_STICK, SDL_BUTTON_LEFT_SHOULDER, SDL_BUTTON_RIGHT_SHOULDER,
+    SDL_BUTTON_DPAD_UP, SDL_BUTTON_DPAD_DOWN, SDL_BUTTON_DPAD_LEFT, SDL_BUTTON_DPAD_RIGHT
+};
+enum {
+    SDL_AXIS_LEFTX, SDL_AXIS_LEFTY, SDL_AXIS_RIGHTX, SDL_AXIS_RIGHTY,
+    SDL_AXIS_LEFT_TRIGGER, SDL_AXIS_RIGHT_TRIGGER
+};
+
+static struct {
+    bool (__cdecl* Init)(uint32_t flags);
+    const char* (__cdecl* GetError)(void);
+    bool (__cdecl* SetHint)(const char* name, const char* value);
+    void (__cdecl* SetGamepadEventsEnabled)(bool enabled);
+    void (__cdecl* UpdateGamepads)(void);
+    uint32_t* (__cdecl* GetGamepads)(int* count);
+    void (__cdecl* free)(void* memory);
+    SDL_Gamepad* (__cdecl* OpenGamepad)(uint32_t instance_id);
+    bool (__cdecl* GamepadConnected)(SDL_Gamepad* gamepad);
+    void (__cdecl* CloseGamepad)(SDL_Gamepad* gamepad);
+    int16_t (__cdecl* GetGamepadAxis)(SDL_Gamepad* gamepad, int axis);
+    bool (__cdecl* GetGamepadButton)(SDL_Gamepad* gamepad, int button);
+} g_sdl;
+static bool g_sdl_ready = false;
+static SDL_Gamepad* g_gamepad = NULL;
+
+static void load_sdl(void) {
+    static bool attempted = false;
+    if (attempted) return;
+    attempted = true;
+
+    char path[MAX_PATH];
+    shim_game_path(path, "SDL3.dll");
+    HMODULE sdl = LoadLibraryA(path);
+    if (!sdl) {
+        shim_log("SDL3.dll not found beside the game; gamepad support disabled");
+        return;
+    }
+    const struct { const char* name; void** slot; } imports[] = {
+        {"SDL_Init", (void**)&g_sdl.Init},
+        {"SDL_GetError", (void**)&g_sdl.GetError},
+        {"SDL_SetHint", (void**)&g_sdl.SetHint},
+        {"SDL_SetGamepadEventsEnabled", (void**)&g_sdl.SetGamepadEventsEnabled},
+        {"SDL_UpdateGamepads", (void**)&g_sdl.UpdateGamepads},
+        {"SDL_GetGamepads", (void**)&g_sdl.GetGamepads},
+        {"SDL_free", (void**)&g_sdl.free},
+        {"SDL_OpenGamepad", (void**)&g_sdl.OpenGamepad},
+        {"SDL_GamepadConnected", (void**)&g_sdl.GamepadConnected},
+        {"SDL_CloseGamepad", (void**)&g_sdl.CloseGamepad},
+        {"SDL_GetGamepadAxis", (void**)&g_sdl.GetGamepadAxis},
+        {"SDL_GetGamepadButton", (void**)&g_sdl.GetGamepadButton},
+    };
+    for (size_t i = 0; i < sizeof(imports) / sizeof(imports[0]); ++i) {
+        *imports[i].slot = (void*)GetProcAddress(sdl, imports[i].name);
+        if (!*imports[i].slot) {
+            shim_log("SDL3.dll lacks %s; gamepad support disabled", imports[i].name);
+            return;
+        }
+    }
+    /* SDL owns no window here, so focus must never mute pad input. */
+    g_sdl.SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+    if (!g_sdl.Init(SDL_INIT_GAMEPAD)) {
+        shim_log("SDL_Init failed: %s", g_sdl.GetError());
+        return;
+    }
+    /* Nothing pumps SDL events in this process; state is polled instead. */
+    g_sdl.SetGamepadEventsEnabled(false);
+    g_sdl_ready = true;
+    shim_log("SDL3 gamepad backend ready");
+}
+
+/* Returns the first connected gamepad, reopening after a disconnect. */
+static SDL_Gamepad* current_gamepad(void) {
+    if (!g_sdl_ready) return NULL;
+    g_sdl.UpdateGamepads();
+    if (g_gamepad && g_sdl.GamepadConnected(g_gamepad)) return g_gamepad;
+    if (g_gamepad) {
+        g_sdl.CloseGamepad(g_gamepad);
+        g_gamepad = NULL;
+        shim_log("SDL gamepad disconnected");
+    }
+    int count = 0;
+    uint32_t* ids = g_sdl.GetGamepads(&count);
+    for (int i = 0; ids && i < count && !g_gamepad; ++i) {
+        g_gamepad = g_sdl.OpenGamepad(ids[i]);
+    }
+    g_sdl.free(ids);
+    if (g_gamepad) shim_log("SDL gamepad opened (%d connected)", count);
+    return g_gamepad;
+}
+
+/* SDL sticks are down-positive; PadState keeps XInput's up-positive Y. */
+static SHORT flip_axis(int16_t value) {
+    return value == -32768 ? 32767 : (SHORT)-value;
+}
+
+/* SDL triggers run 0..32767; PadState triggers run 0..255. */
+static BYTE trigger_byte(int16_t value) {
+    return value <= 0 ? 0 : (BYTE)(value * 255 / 32767);
+}
+
+static BOOL read_pad(PadState* pad) {
+    static const struct { int button; WORD mask; } buttons[] = {
+        {SDL_BUTTON_SOUTH, XBTN_A}, {SDL_BUTTON_EAST, XBTN_B},
+        {SDL_BUTTON_WEST, XBTN_X}, {SDL_BUTTON_NORTH, XBTN_Y},
+        {SDL_BUTTON_BACK, XBTN_BACK}, {SDL_BUTTON_START, XBTN_START},
+        {SDL_BUTTON_LEFT_STICK, XBTN_LTHUMB}, {SDL_BUTTON_RIGHT_STICK, XBTN_RTHUMB},
+        {SDL_BUTTON_LEFT_SHOULDER, XBTN_LSHOULDER},
+        {SDL_BUTTON_RIGHT_SHOULDER, XBTN_RSHOULDER},
+        {SDL_BUTTON_DPAD_UP, XBTN_DPAD_UP}, {SDL_BUTTON_DPAD_DOWN, XBTN_DPAD_DOWN},
+        {SDL_BUTTON_DPAD_LEFT, XBTN_DPAD_LEFT}, {SDL_BUTTON_DPAD_RIGHT, XBTN_DPAD_RIGHT},
+    };
+    SDL_Gamepad* gamepad = current_gamepad();
+    if (!gamepad) return FALSE;
+
+    memset(pad, 0, sizeof(*pad));
+    for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); ++i) {
+        if (g_sdl.GetGamepadButton(gamepad, buttons[i].button)) pad->wButtons |= buttons[i].mask;
+    }
+    pad->sThumbLX = g_sdl.GetGamepadAxis(gamepad, SDL_AXIS_LEFTX);
+    pad->sThumbLY = flip_axis(g_sdl.GetGamepadAxis(gamepad, SDL_AXIS_LEFTY));
+    pad->sThumbRX = g_sdl.GetGamepadAxis(gamepad, SDL_AXIS_RIGHTX);
+    pad->sThumbRY = flip_axis(g_sdl.GetGamepadAxis(gamepad, SDL_AXIS_RIGHTY));
+    pad->bLeftTrigger = trigger_byte(g_sdl.GetGamepadAxis(gamepad, SDL_AXIS_LEFT_TRIGGER));
+    pad->bRightTrigger = trigger_byte(g_sdl.GetGamepadAxis(gamepad, SDL_AXIS_RIGHT_TRIGGER));
+    return TRUE;
+}
+
+/* ── Apply deadzone to a thumbstick ───────────────────────────────── */
 
 static SHORT apply_deadzone(SHORT val, SHORT dz) {
     if (dz < 0) dz = 0;
@@ -233,7 +368,7 @@ static SHORT configured_deadzone(const AxisConfig* axis) {
     return (SHORT)((pct * 32767UL) / 10000UL);
 }
 
-/* ── XInput → DIJOYSTATE mapping ──────────────────────────────────── */
+/* ── PadState → DIJOYSTATE mapping ────────────────────────────────── */
 
 /* Scale a normalized value (-32768..32767) to the configured axis range */
 static LONG scale_axis(LONG raw, LONG rmin, LONG rmax) {
@@ -252,17 +387,32 @@ static LONG scale_trigger(BYTE raw, LONG rmin, LONG rmax) {
     return rmin + (LONG)((int64_t)raw * (rmax - rmin) / 255);
 }
 
-/* Inject mouse movement from a stick via SendInput */
-#define MOUSE_SENSITIVITY 15  /* pixels per poll at full deflection */
+/* Full deflection moves the cursor 900 px/s (the old 15 px per poll at 60 Hz). */
+#define MOUSE_PIXELS_PER_SECOND 900.0f
 
-static void inject_mouse_from_stick(SHORT raw_x, SHORT raw_y,
+/* Converts stick travel over elapsed time to whole pixels, keeping the fraction. */
+static int stick_mouse_pixels(float* carry, int value, float seconds) {
+    *carry += (float)value * (MOUSE_PIXELS_PER_SECOND / 32767.0f) * seconds;
+    int pixels = (int)*carry;
+    *carry -= (float)pixels;
+    return pixels;
+}
+
+/* Inject mouse movement from a stick via SendInput, independent of poll rate */
+static void inject_mouse_from_stick(SyntheticInputState* state, SHORT raw_x, SHORT raw_y,
                                     SHORT deadzone_x, SHORT deadzone_y) {
-    SHORT dx = apply_deadzone(raw_x, deadzone_x);
-    SHORT dy = apply_deadzone(raw_y, deadzone_y);
-    if (dx == 0 && dy == 0) return;
+    LARGE_INTEGER now;
+    LARGE_INTEGER frequency;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&frequency);
+    float seconds = state->last_mouse_move.QuadPart == 0 ? 0.0f
+        : (float)(now.QuadPart - state->last_mouse_move.QuadPart) / (float)frequency.QuadPart;
+    state->last_mouse_move = now;
+    if (seconds > 0.1f) seconds = 0.1f;  /* no cursor jump after a stall */
 
-    int mx = (int)dx * MOUSE_SENSITIVITY / 32767;
-    int my = -(int)dy * MOUSE_SENSITIVITY / 32767;  /* invert Y: stick up → mouse up */
+    int mx = stick_mouse_pixels(&state->mouse_carry_x, apply_deadzone(raw_x, deadzone_x), seconds);
+    /* invert Y: stick up → mouse up */
+    int my = stick_mouse_pixels(&state->mouse_carry_y, -apply_deadzone(raw_y, deadzone_y), seconds);
     if (mx == 0 && my == 0) return;
 
     INPUT inp;
@@ -306,28 +456,24 @@ static void set_synthetic_input(SyntheticInputState* state, BOOL space_down,
 
 static void release_synthetic_input(SyntheticInputState* state) {
     set_synthetic_input(state, FALSE, FALSE, FALSE);
+    state->last_mouse_move.QuadPart = 0;
 }
 
-static BOOL xinput_read_joystate(DWORD user_idx, const AxisConfig axes[NUM_AXES],
-                                 SyntheticInputState* synthetic, BOOL allow_injection,
-                                 DIJOYSTATE* js) {
-    if (!g_XInputGetState) {
-        release_synthetic_input(synthetic);
-        return FALSE;
-    }
-    XINPUT_STATE xs;
-    DWORD res = g_XInputGetState(user_idx, &xs);
-    if (res != 0) {
+static BOOL pad_read_joystate(const AxisConfig axes[NUM_AXES],
+                              SyntheticInputState* synthetic, BOOL allow_injection,
+                              DIJOYSTATE* js) {
+    PadState pad;
+    if (!read_pad(&pad)) {
         release_synthetic_input(synthetic);
         return FALSE;
     }
 
     memset(js, 0, sizeof(*js));
-    XINPUT_GAMEPAD* gp = &xs.Gamepad;
+    PadState* gp = &pad;
     WORD btn = gp->wButtons;
 
     if (allow_injection) {
-        inject_mouse_from_stick(gp->sThumbRX, gp->sThumbRY,
+        inject_mouse_from_stick(synthetic, gp->sThumbRX, gp->sThumbRY,
                                 configured_deadzone(&axes[3]),
                                 configured_deadzone(&axes[4]));
     } else {
@@ -401,45 +547,45 @@ static BOOL xinput_read_joystate(DWORD user_idx, const AxisConfig axes[NUM_AXES]
 }
 
 /* ══════════════════════════════════════════════════════════════════════
- * IDirectInputDevice7A wrapper — XInput-backed virtual joystick
+ * IDirectInputDevice7A wrapper — SDL3-backed virtual joystick
  * ══════════════════════════════════════════════════════════════════════ */
 
-typedef struct XInputDevice XInputDevice;
+typedef struct GamepadDevice GamepadDevice;
 
 /* COM vtable — 29 methods for IDirectInputDevice7A */
 typedef struct {
-    HRESULT_T (STDMETHODCALLTYPE* QueryInterface)(XInputDevice*, const MY_IID*, void**);
-    ULONG     (STDMETHODCALLTYPE* AddRef)(XInputDevice*);
-    ULONG     (STDMETHODCALLTYPE* Release)(XInputDevice*);
-    HRESULT_T (STDMETHODCALLTYPE* GetCapabilities)(XInputDevice*, DIDEVCAPS*);
-    HRESULT_T (STDMETHODCALLTYPE* EnumObjects)(XInputDevice*, void*, void*, DWORD);
-    HRESULT_T (STDMETHODCALLTYPE* GetProperty)(XInputDevice*, const MY_GUID*, void*);
-    HRESULT_T (STDMETHODCALLTYPE* SetProperty)(XInputDevice*, const MY_GUID*, const void*);
-    HRESULT_T (STDMETHODCALLTYPE* Acquire)(XInputDevice*);
-    HRESULT_T (STDMETHODCALLTYPE* Unacquire)(XInputDevice*);
-    HRESULT_T (STDMETHODCALLTYPE* GetDeviceState)(XInputDevice*, DWORD, void*);
-    HRESULT_T (STDMETHODCALLTYPE* GetDeviceData)(XInputDevice*, DWORD, void*, DWORD*, DWORD);
-    HRESULT_T (STDMETHODCALLTYPE* SetDataFormat)(XInputDevice*, const DIDATAFORMAT*);
-    HRESULT_T (STDMETHODCALLTYPE* SetEventNotification)(XInputDevice*, HANDLE);
-    HRESULT_T (STDMETHODCALLTYPE* SetCooperativeLevel)(XInputDevice*, HWND, DWORD);
-    HRESULT_T (STDMETHODCALLTYPE* GetObjectInfo)(XInputDevice*, void*, DWORD, DWORD);
-    HRESULT_T (STDMETHODCALLTYPE* GetDeviceInfo)(XInputDevice*, void*);
-    HRESULT_T (STDMETHODCALLTYPE* RunControlPanel)(XInputDevice*, HWND, DWORD);
-    HRESULT_T (STDMETHODCALLTYPE* Initialize)(XInputDevice*, HINSTANCE, DWORD, const MY_GUID*);
+    HRESULT_T (STDMETHODCALLTYPE* QueryInterface)(GamepadDevice*, const MY_IID*, void**);
+    ULONG     (STDMETHODCALLTYPE* AddRef)(GamepadDevice*);
+    ULONG     (STDMETHODCALLTYPE* Release)(GamepadDevice*);
+    HRESULT_T (STDMETHODCALLTYPE* GetCapabilities)(GamepadDevice*, DIDEVCAPS*);
+    HRESULT_T (STDMETHODCALLTYPE* EnumObjects)(GamepadDevice*, void*, void*, DWORD);
+    HRESULT_T (STDMETHODCALLTYPE* GetProperty)(GamepadDevice*, const MY_GUID*, void*);
+    HRESULT_T (STDMETHODCALLTYPE* SetProperty)(GamepadDevice*, const MY_GUID*, const void*);
+    HRESULT_T (STDMETHODCALLTYPE* Acquire)(GamepadDevice*);
+    HRESULT_T (STDMETHODCALLTYPE* Unacquire)(GamepadDevice*);
+    HRESULT_T (STDMETHODCALLTYPE* GetDeviceState)(GamepadDevice*, DWORD, void*);
+    HRESULT_T (STDMETHODCALLTYPE* GetDeviceData)(GamepadDevice*, DWORD, void*, DWORD*, DWORD);
+    HRESULT_T (STDMETHODCALLTYPE* SetDataFormat)(GamepadDevice*, const DIDATAFORMAT*);
+    HRESULT_T (STDMETHODCALLTYPE* SetEventNotification)(GamepadDevice*, HANDLE);
+    HRESULT_T (STDMETHODCALLTYPE* SetCooperativeLevel)(GamepadDevice*, HWND, DWORD);
+    HRESULT_T (STDMETHODCALLTYPE* GetObjectInfo)(GamepadDevice*, void*, DWORD, DWORD);
+    HRESULT_T (STDMETHODCALLTYPE* GetDeviceInfo)(GamepadDevice*, void*);
+    HRESULT_T (STDMETHODCALLTYPE* RunControlPanel)(GamepadDevice*, HWND, DWORD);
+    HRESULT_T (STDMETHODCALLTYPE* Initialize)(GamepadDevice*, HINSTANCE, DWORD, const MY_GUID*);
     /* IDirectInputDevice2A */
-    HRESULT_T (STDMETHODCALLTYPE* CreateEffect)(XInputDevice*, const MY_GUID*, const void*, void**, void*);
-    HRESULT_T (STDMETHODCALLTYPE* EnumEffects)(XInputDevice*, void*, void*, DWORD);
-    HRESULT_T (STDMETHODCALLTYPE* GetEffectInfo)(XInputDevice*, void*, const MY_GUID*);
-    HRESULT_T (STDMETHODCALLTYPE* GetForceFeedbackState)(XInputDevice*, DWORD*);
-    HRESULT_T (STDMETHODCALLTYPE* SendForceFeedbackCommand)(XInputDevice*, DWORD);
-    HRESULT_T (STDMETHODCALLTYPE* EnumCreatedEffectObjects)(XInputDevice*, void*, void*, DWORD);
-    HRESULT_T (STDMETHODCALLTYPE* Escape)(XInputDevice*, void*);
-    HRESULT_T (STDMETHODCALLTYPE* Poll)(XInputDevice*);
-    HRESULT_T (STDMETHODCALLTYPE* SendDeviceData)(XInputDevice*, DWORD, const void*, DWORD*, DWORD);
+    HRESULT_T (STDMETHODCALLTYPE* CreateEffect)(GamepadDevice*, const MY_GUID*, const void*, void**, void*);
+    HRESULT_T (STDMETHODCALLTYPE* EnumEffects)(GamepadDevice*, void*, void*, DWORD);
+    HRESULT_T (STDMETHODCALLTYPE* GetEffectInfo)(GamepadDevice*, void*, const MY_GUID*);
+    HRESULT_T (STDMETHODCALLTYPE* GetForceFeedbackState)(GamepadDevice*, DWORD*);
+    HRESULT_T (STDMETHODCALLTYPE* SendForceFeedbackCommand)(GamepadDevice*, DWORD);
+    HRESULT_T (STDMETHODCALLTYPE* EnumCreatedEffectObjects)(GamepadDevice*, void*, void*, DWORD);
+    HRESULT_T (STDMETHODCALLTYPE* Escape)(GamepadDevice*, void*);
+    HRESULT_T (STDMETHODCALLTYPE* Poll)(GamepadDevice*);
+    HRESULT_T (STDMETHODCALLTYPE* SendDeviceData)(GamepadDevice*, DWORD, const void*, DWORD*, DWORD);
     /* IDirectInputDevice7A */
-    HRESULT_T (STDMETHODCALLTYPE* EnumEffectsInFile)(XInputDevice*, const char*, void*, void*, DWORD);
-    HRESULT_T (STDMETHODCALLTYPE* WriteEffectToFile)(XInputDevice*, const char*, DWORD, void*, DWORD);
-} XInputDeviceVtbl;
+    HRESULT_T (STDMETHODCALLTYPE* EnumEffectsInFile)(GamepadDevice*, const char*, void*, void*, DWORD);
+    HRESULT_T (STDMETHODCALLTYPE* WriteEffectToFile)(GamepadDevice*, const char*, DWORD, void*, DWORD);
+} GamepadDeviceVtbl;
 
 /* DIPROP_* are small integers, not real GUID pointers */
 #define DIPROP_RANGE     ((const MY_GUID*)(uintptr_t)4)
@@ -456,20 +602,19 @@ typedef struct { DWORD dwSize, dwHeaderSize, dwObj, dwHow; } DIPROPHEADER;
 typedef struct { DIPROPHEADER diph; LONG lMin, lMax; } DIPROPRANGE;
 typedef struct { DIPROPHEADER diph; DWORD dwData; } DIPROPDWORD;
 
-struct XInputDevice {
-    const XInputDeviceVtbl* vtbl;
+struct GamepadDevice {
+    const GamepadDeviceVtbl* vtbl;
     LONG ref_count;
-    DWORD user_index;
     BOOL acquired;
     HWND hwnd;
     SyntheticInputState synthetic;
     AxisConfig axes[NUM_AXES];  /* indexed by offset/4: 0=lX,1=lY,2=lZ,3=lRx,4=lRy,5=lRz */
 };
 
-/* ── XInput device method implementations ─────────────────────────── */
+/* ── Virtual gamepad method implementations ───────────────────────── */
 
-static HRESULT_T STDMETHODCALLTYPE xdev_QueryInterface(XInputDevice* self, const MY_IID* riid, void** ppv) {
-    shim_log("XInputDevice: QueryInterface(iid=%08lx-%04x-%04x) ppv=%p self=%p",
+static HRESULT_T STDMETHODCALLTYPE xdev_QueryInterface(GamepadDevice* self, const MY_IID* riid, void** ppv) {
+    shim_log("GamepadDevice: QueryInterface(iid=%08lx-%04x-%04x) ppv=%p self=%p",
            riid ? riid->Data1 : 0, riid ? riid->Data2 : 0, riid ? riid->Data3 : 0,
            (void*)ppv, (void*)self);
     if (!ppv || !riid) return E_POINTER_T;
@@ -482,27 +627,27 @@ static HRESULT_T STDMETHODCALLTYPE xdev_QueryInterface(XInputDevice* self, const
     }
     *ppv = self;
     LONG refs = InterlockedIncrement(&self->ref_count);
-    shim_log("XInputDevice: QI wrote *ppv=%p refcount=%ld", (void*)*ppv, refs);
+    shim_log("GamepadDevice: QI wrote *ppv=%p refcount=%ld", (void*)*ppv, refs);
     (void)refs;
     return DI_OK;
 }
 
-static ULONG STDMETHODCALLTYPE xdev_AddRef(XInputDevice* self) {
+static ULONG STDMETHODCALLTYPE xdev_AddRef(GamepadDevice* self) {
     return InterlockedIncrement(&self->ref_count);
 }
 
-static ULONG STDMETHODCALLTYPE xdev_Release(XInputDevice* self) {
+static ULONG STDMETHODCALLTYPE xdev_Release(GamepadDevice* self) {
     LONG r = InterlockedDecrement(&self->ref_count);
     if (r <= 0) {
         release_synthetic_input(&self->synthetic);
-        shim_log("XInputDevice: destroyed (user %lu)", self->user_index);
+        shim_log("GamepadDevice: destroyed");
         HeapFree(GetProcessHeap(), 0, self);
     }
     return r;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_GetCapabilities(XInputDevice* self, DIDEVCAPS* caps) {
-    shim_log("XInputDevice: GetCapabilities");
+static HRESULT_T STDMETHODCALLTYPE xdev_GetCapabilities(GamepadDevice* self, DIDEVCAPS* caps) {
+    shim_log("GamepadDevice: GetCapabilities");
     (void)self;
     if (!caps) return DIERR_INVALIDPARAM;
     DWORD size = caps->dwSize;
@@ -519,8 +664,8 @@ static HRESULT_T STDMETHODCALLTYPE xdev_GetCapabilities(XInputDevice* self, DIDE
     return DI_OK;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_EnumObjects(XInputDevice* s, void* cb, void* ref, DWORD fl) {
-    shim_log("XInputDevice: EnumObjects(flags=0x%lx)", fl);
+static HRESULT_T STDMETHODCALLTYPE xdev_EnumObjects(GamepadDevice* s, void* cb, void* ref, DWORD fl) {
+    shim_log("GamepadDevice: EnumObjects(flags=0x%lx)", fl);
     (void)s;
     LPDIENUMDEVICEOBJECTSCALLBACKA callback = (LPDIENUMDEVICEOBJECTSCALLBACKA)cb;
     if (!callback) return DIERR_INVALIDPARAM;
@@ -584,8 +729,8 @@ static HRESULT_T STDMETHODCALLTYPE xdev_EnumObjects(XInputDevice* s, void* cb, v
     return DI_OK;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_GetProperty(XInputDevice* self, const MY_GUID* g, void* h) {
-    shim_log("XInputDevice: GetProperty(prop=%lu)", IS_DIPROP(g) ? (unsigned long)(uintptr_t)g : 0);
+static HRESULT_T STDMETHODCALLTYPE xdev_GetProperty(GamepadDevice* self, const MY_GUID* g, void* h) {
+    shim_log("GamepadDevice: GetProperty(prop=%lu)", IS_DIPROP(g) ? (unsigned long)(uintptr_t)g : 0);
     if (!h) return DIERR_INVALIDPARAM;
     DIPROPHEADER* hdr = (DIPROPHEADER*)h;
     if (hdr->dwHeaderSize != sizeof(DIPROPHEADER)) return DIERR_INVALIDPARAM;
@@ -617,14 +762,14 @@ static HRESULT_T STDMETHODCALLTYPE xdev_GetProperty(XInputDevice* self, const MY
     return E_NOTIMPL_T;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_SetProperty(XInputDevice* self, const MY_GUID* g, const void* h) {
+static HRESULT_T STDMETHODCALLTYPE xdev_SetProperty(GamepadDevice* self, const MY_GUID* g, const void* h) {
     if (!h) return DIERR_INVALIDPARAM;
     const DIPROPHEADER* hdr = (const DIPROPHEADER*)h;
     if (hdr->dwHeaderSize != sizeof(DIPROPHEADER)) return DIERR_INVALIDPARAM;
 
     if (g == DIPROP_RANGE) {
         const DIPROPRANGE* pr = (const DIPROPRANGE*)h;
-        shim_log("XInputDevice: SetProperty DIPROP_RANGE obj=%lu how=%lu min=%ld max=%ld",
+        shim_log("GamepadDevice: SetProperty DIPROP_RANGE obj=%lu how=%lu min=%ld max=%ld",
                hdr->dwObj, hdr->dwHow, pr->lMin, pr->lMax);
         if (hdr->dwSize != sizeof(DIPROPRANGE) || pr->lMin >= pr->lMax)
             return DIERR_INVALIDPARAM;
@@ -646,7 +791,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_SetProperty(XInputDevice* self, const MY
 
     if (g == DIPROP_DEADZONE) {
         const DIPROPDWORD* pd = (const DIPROPDWORD*)h;
-        shim_log("XInputDevice: SetProperty DIPROP_DEADZONE obj=%lu how=%lu val=%lu",
+        shim_log("GamepadDevice: SetProperty DIPROP_DEADZONE obj=%lu how=%lu val=%lu",
                hdr->dwObj, hdr->dwHow, pd->dwData);
         if (hdr->dwSize != sizeof(DIPROPDWORD) || pd->dwData > 10000)
             return DIERR_INVALIDPARAM;
@@ -662,27 +807,27 @@ static HRESULT_T STDMETHODCALLTYPE xdev_SetProperty(XInputDevice* self, const MY
         return DI_OK;
     }
 
-    shim_log("XInputDevice: SetProperty(prop=%lu)", IS_DIPROP(g) ? (unsigned long)(uintptr_t)g : 0);
+    shim_log("GamepadDevice: SetProperty(prop=%lu)", IS_DIPROP(g) ? (unsigned long)(uintptr_t)g : 0);
     return E_NOTIMPL_T;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_Acquire(XInputDevice* self) {
+static HRESULT_T STDMETHODCALLTYPE xdev_Acquire(GamepadDevice* self) {
     self->acquired = TRUE;
-    shim_log("XInputDevice: acquired (user %lu)", self->user_index);
+    shim_log("GamepadDevice: acquired");
     return DI_OK;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_Unacquire(XInputDevice* self) {
-    shim_log("XInputDevice: Unacquire");
+static HRESULT_T STDMETHODCALLTYPE xdev_Unacquire(GamepadDevice* self) {
+    shim_log("GamepadDevice: Unacquire");
     release_synthetic_input(&self->synthetic);
     self->acquired = FALSE;
     return DI_OK;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceState(XInputDevice* self, DWORD cbData, void* lpvData) {
+static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceState(GamepadDevice* self, DWORD cbData, void* lpvData) {
     /* Only log first call to avoid flooding */
     static int logged = 0;
-    if (!logged) { shim_log("XInputDevice: GetDeviceState(size=%lu) [first call]", cbData); logged = 1; }
+    if (!logged) { shim_log("GamepadDevice: GetDeviceState(size=%lu) [first call]", cbData); logged = 1; }
     if (!lpvData) return DIERR_INVALIDPARAM;
     if (!self->acquired) {
         release_synthetic_input(&self->synthetic);
@@ -692,8 +837,7 @@ static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceState(XInputDevice* self, DWORD
 
     DIJOYSTATE js;
     BOOL allow_injection = self->hwnd != NULL && GetForegroundWindow() == self->hwnd;
-    if (!xinput_read_joystate(self->user_index, self->axes, &self->synthetic,
-                              allow_injection, &js)) {
+    if (!pad_read_joystate(self->axes, &self->synthetic, allow_injection, &js)) {
         memset(&js, 0, sizeof(js));
         js.lX = (self->axes[0].range_min + self->axes[0].range_max) / 2;
         js.lY = (self->axes[1].range_min + self->axes[1].range_max) / 2;
@@ -709,38 +853,38 @@ static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceState(XInputDevice* self, DWORD
     return DI_OK;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceData(XInputDevice* s, DWORD a, void* b, DWORD* c, DWORD d) {
-    shim_log("XInputDevice: GetDeviceData");
+static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceData(GamepadDevice* s, DWORD a, void* b, DWORD* c, DWORD d) {
+    shim_log("GamepadDevice: GetDeviceData");
     (void)s; (void)a; (void)b; (void)d;
     if (c) *c = 0;
     return DI_OK;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_SetDataFormat(XInputDevice* self, const DIDATAFORMAT* df) {
+static HRESULT_T STDMETHODCALLTYPE xdev_SetDataFormat(GamepadDevice* self, const DIDATAFORMAT* df) {
     if (!df) return DIERR_INVALIDPARAM;
     (void)self;
-    shim_log("XInputDevice: SetDataFormat size=%lu", df->dwDataSize);
+    shim_log("GamepadDevice: SetDataFormat size=%lu", df->dwDataSize);
     return DI_OK;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_SetEventNotification(XInputDevice* s, HANDLE h) {
+static HRESULT_T STDMETHODCALLTYPE xdev_SetEventNotification(GamepadDevice* s, HANDLE h) {
     (void)s; (void)h;
     return DI_OK;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_SetCooperativeLevel(XInputDevice* s, HWND hw, DWORD fl) {
+static HRESULT_T STDMETHODCALLTYPE xdev_SetCooperativeLevel(GamepadDevice* s, HWND hw, DWORD fl) {
     s->hwnd = hw;
-    shim_log("XInputDevice: SetCooperativeLevel flags=0x%lx", fl);
+    shim_log("GamepadDevice: SetCooperativeLevel flags=0x%lx", fl);
     (void)fl;
     return DI_OK;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_GetObjectInfo(XInputDevice* s, void* a, DWORD b, DWORD c) {
+static HRESULT_T STDMETHODCALLTYPE xdev_GetObjectInfo(GamepadDevice* s, void* a, DWORD b, DWORD c) {
     (void)s; (void)a; (void)b; (void)c;
     return DIERR_INVALIDPARAM;
 }
 
-static HRESULT_T fill_xinput_device_info(DIDEVICEINSTANCEA* info) {
+static HRESULT_T fill_gamepad_device_info(DIDEVICEINSTANCEA* info) {
     if (!info) return DIERR_INVALIDPARAM;
     DWORD size = info->dwSize;
     DWORD dx3_size = (DWORD)offsetof(DIDEVICEINSTANCEA, guidFFDriver);
@@ -749,78 +893,78 @@ static HRESULT_T fill_xinput_device_info(DIDEVICEINSTANCEA* info) {
     }
     memset(info, 0, size);
     info->dwSize = size;
-    memcpy(&info->guidInstance, &GUID_XInputPad, sizeof(MY_GUID));
-    memcpy(&info->guidProduct, &GUID_XInputPad, sizeof(MY_GUID));
+    memcpy(&info->guidInstance, &GUID_VirtualGamepad, sizeof(MY_GUID));
+    memcpy(&info->guidProduct, &GUID_VirtualGamepad, sizeof(MY_GUID));
     info->dwDevType = DIDEVTYPE_JOYSTICK | (0x01 << 8);
-    strncpy(info->tszInstanceName, "Xbox Controller (XInput)", 259);
+    strncpy(info->tszInstanceName, "Xbox Controller (SDL)", 259);
     strncpy(info->tszProductName, "Xbox Controller", 259);
     return DI_OK;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceInfo(XInputDevice* s, void* a) {
-    shim_log("XInputDevice: GetDeviceInfo");
+static HRESULT_T STDMETHODCALLTYPE xdev_GetDeviceInfo(GamepadDevice* s, void* a) {
+    shim_log("GamepadDevice: GetDeviceInfo");
     (void)s;
-    return fill_xinput_device_info((DIDEVICEINSTANCEA*)a);
+    return fill_gamepad_device_info((DIDEVICEINSTANCEA*)a);
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_RunControlPanel(XInputDevice* s, HWND h, DWORD d) {
+static HRESULT_T STDMETHODCALLTYPE xdev_RunControlPanel(GamepadDevice* s, HWND h, DWORD d) {
     (void)s; (void)h; (void)d;
     return DI_OK;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_Initialize(XInputDevice* s, HINSTANCE h, DWORD v, const MY_GUID* g) {
+static HRESULT_T STDMETHODCALLTYPE xdev_Initialize(GamepadDevice* s, HINSTANCE h, DWORD v, const MY_GUID* g) {
     (void)s; (void)h; (void)v; (void)g;
     return DI_OK;
 }
 
-static HRESULT_T STDMETHODCALLTYPE xdev_CreateEffect(XInputDevice* s, const MY_GUID* a, const void* b, void** c, void* d) {
+static HRESULT_T STDMETHODCALLTYPE xdev_CreateEffect(GamepadDevice* s, const MY_GUID* a, const void* b, void** c, void* d) {
     (void)s; (void)a; (void)b; (void)c; (void)d;
     return DIERR_INVALIDPARAM;
 }
-static HRESULT_T STDMETHODCALLTYPE xdev_EnumEffects(XInputDevice* s, void* a, void* b, DWORD c) {
+static HRESULT_T STDMETHODCALLTYPE xdev_EnumEffects(GamepadDevice* s, void* a, void* b, DWORD c) {
     (void)s; (void)a; (void)b; (void)c;
     return DI_OK;
 }
-static HRESULT_T STDMETHODCALLTYPE xdev_GetEffectInfo(XInputDevice* s, void* a, const MY_GUID* b) {
+static HRESULT_T STDMETHODCALLTYPE xdev_GetEffectInfo(GamepadDevice* s, void* a, const MY_GUID* b) {
     (void)s; (void)a; (void)b;
     return DIERR_INVALIDPARAM;
 }
-static HRESULT_T STDMETHODCALLTYPE xdev_GetForceFeedbackState(XInputDevice* s, DWORD* a) {
+static HRESULT_T STDMETHODCALLTYPE xdev_GetForceFeedbackState(GamepadDevice* s, DWORD* a) {
     (void)s; if (a) *a = 0;
     return DI_OK;
 }
-static HRESULT_T STDMETHODCALLTYPE xdev_SendForceFeedbackCommand(XInputDevice* s, DWORD a) {
+static HRESULT_T STDMETHODCALLTYPE xdev_SendForceFeedbackCommand(GamepadDevice* s, DWORD a) {
     (void)s; (void)a;
     return DI_OK;
 }
-static HRESULT_T STDMETHODCALLTYPE xdev_EnumCreatedEffectObjects(XInputDevice* s, void* a, void* b, DWORD c) {
+static HRESULT_T STDMETHODCALLTYPE xdev_EnumCreatedEffectObjects(GamepadDevice* s, void* a, void* b, DWORD c) {
     (void)s; (void)a; (void)b; (void)c;
     return DI_OK;
 }
-static HRESULT_T STDMETHODCALLTYPE xdev_Escape(XInputDevice* s, void* a) {
+static HRESULT_T STDMETHODCALLTYPE xdev_Escape(GamepadDevice* s, void* a) {
     (void)s; (void)a;
     return DIERR_INVALIDPARAM;
 }
-static HRESULT_T STDMETHODCALLTYPE xdev_Poll(XInputDevice* s) {
+static HRESULT_T STDMETHODCALLTYPE xdev_Poll(GamepadDevice* s) {
     static int logged = 0;
-    if (!logged) { shim_log("XInputDevice: Poll [first call]"); logged = 1; }
+    if (!logged) { shim_log("GamepadDevice: Poll [first call]"); logged = 1; }
     (void)s;
     return DI_OK;
 }
-static HRESULT_T STDMETHODCALLTYPE xdev_SendDeviceData(XInputDevice* s, DWORD a, const void* b, DWORD* c, DWORD d) {
+static HRESULT_T STDMETHODCALLTYPE xdev_SendDeviceData(GamepadDevice* s, DWORD a, const void* b, DWORD* c, DWORD d) {
     (void)s; (void)a; (void)b; (void)c; (void)d;
     return DIERR_INVALIDPARAM;
 }
-static HRESULT_T STDMETHODCALLTYPE xdev_EnumEffectsInFile(XInputDevice* s, const char* a, void* b, void* c, DWORD d) {
+static HRESULT_T STDMETHODCALLTYPE xdev_EnumEffectsInFile(GamepadDevice* s, const char* a, void* b, void* c, DWORD d) {
     (void)s; (void)a; (void)b; (void)c; (void)d;
     return DI_OK;
 }
-static HRESULT_T STDMETHODCALLTYPE xdev_WriteEffectToFile(XInputDevice* s, const char* a, DWORD b, void* c, DWORD d) {
+static HRESULT_T STDMETHODCALLTYPE xdev_WriteEffectToFile(GamepadDevice* s, const char* a, DWORD b, void* c, DWORD d) {
     (void)s; (void)a; (void)b; (void)c; (void)d;
     return DIERR_INVALIDPARAM;
 }
 
-static const XInputDeviceVtbl g_xdev_vtbl = {
+static const GamepadDeviceVtbl g_xdev_vtbl = {
     xdev_QueryInterface,
     xdev_AddRef,
     xdev_Release,
@@ -852,12 +996,11 @@ static const XInputDeviceVtbl g_xdev_vtbl = {
     xdev_WriteEffectToFile,
 };
 
-static XInputDevice* xinput_device_create(DWORD user_index) {
-    XInputDevice* dev = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(XInputDevice));
+static GamepadDevice* gamepad_device_create(void) {
+    GamepadDevice* dev = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(GamepadDevice));
     if (!dev) return NULL;
     dev->vtbl = &g_xdev_vtbl;
     dev->ref_count = 1;
-    dev->user_index = user_index;
     dev->acquired = FALSE;
     /* Default axis ranges — will be overridden by SetProperty(DIPROP_RANGE) */
     for (int i = 0; i < NUM_AXES; i++) {
@@ -865,7 +1008,7 @@ static XInputDevice* xinput_device_create(DWORD user_index) {
         dev->axes[i].range_max = 1000;
         dev->axes[i].deadzone_pct = (THUMB_DEADZONE * 10000UL) / 32767UL;
     }
-    shim_log("XInputDevice: created (user %lu)", user_index);
+    shim_log("GamepadDevice: created");
     return dev;
 }
 
@@ -949,10 +1092,10 @@ static HRESULT_T STDMETHODCALLTYPE wdi_CreateDevice(WrappedDI* self, const MY_GU
                                                       void** ppDevice, void* pUnkOuter) {
     if (!rguid || !ppDevice) return DIERR_INVALIDPARAM;
 
-    /* Intercept our synthetic XInput GUID */
-    if (guid_eq(rguid, &GUID_XInputPad)) {
-        shim_log("CreateDevice: XInput pad requested — creating virtual device");
-        XInputDevice* xdev = xinput_device_create(0);  /* player 1 */
+    /* Intercept our synthetic gamepad GUID */
+    if (guid_eq(rguid, &GUID_VirtualGamepad)) {
+        shim_log("CreateDevice: gamepad requested — creating virtual device");
+        GamepadDevice* xdev = gamepad_device_create();
         if (!xdev) return DIERR_INVALIDPARAM;
         *ppDevice = xdev;
         return DI_OK;
@@ -970,27 +1113,26 @@ static HRESULT_T STDMETHODCALLTYPE wdi_EnumDevices(WrappedDI* self, DWORD devTyp
 
     typedef HRESULT_T (STDMETHODCALLTYPE* FnEnum)(void*, DWORD, LPDIENUMDEVICESCALLBACKA, void*, DWORD);
 
-    /* For joystick enumeration: inject our XInput device FIRST so it gets slot 0,
+    /* For joystick enumeration: inject our SDL gamepad FIRST so it gets slot 0,
        then skip real DI7 joystick enumeration (legacy DInput Xbox driver is broken
        on modern Windows and would steal the slot). */
     BOOL injected = FALSE;
     if (devType == DIDEVTYPE_JOYSTICK || devType == 0) {
-        if (g_XInputGetState && !(dwFlags & DIEDFL_FORCEFEEDBACK)) {
-            XINPUT_STATE xs;
-            if (g_XInputGetState(0, &xs) == 0) {
-                shim_log("EnumDevices: injecting XInput controller as primary device");
+        if (!(dwFlags & DIEDFL_FORCEFEEDBACK)) {
+            if (current_gamepad() != NULL) {
+                shim_log("EnumDevices: injecting SDL gamepad as primary device");
                 DIDEVICEINSTANCEA di;
                 memset(&di, 0, sizeof(di));
                 di.dwSize = sizeof(di);
-                fill_xinput_device_info(&di);
+                fill_gamepad_device_info(&di);
                 if (callback(&di, pvRef) == DIENUM_STOP) {
-                    shim_log("EnumDevices: callback returned STOP after XInput injection");
+                    shim_log("EnumDevices: callback returned STOP after gamepad injection");
                     return DI_OK;
                 }
                 injected = TRUE;
             }
-        } else if (dwFlags & DIEDFL_FORCEFEEDBACK) {
-            shim_log("EnumDevices: skipping XInput pad (FF-only filter)");
+        } else {
+            shim_log("EnumDevices: skipping gamepad (FF-only filter)");
         }
 
         /* For joystick-only queries, skip real DI7 enumeration entirely —
@@ -1032,7 +1174,7 @@ static HRESULT_T STDMETHODCALLTYPE wdi_FindDevice(WrappedDI* self, const MY_GUID
 static HRESULT_T STDMETHODCALLTYPE wdi_CreateDeviceEx(WrappedDI* self, const MY_GUID* rguid,
                                                         const MY_IID* riid, void** ppvObj,
                                                         void* pUnkOuter) {
-    if (rguid && guid_eq(rguid, &GUID_XInputPad)) {
+    if (rguid && guid_eq(rguid, &GUID_VirtualGamepad)) {
         if (!riid || !ppvObj) return DIERR_INVALIDPARAM;
         *ppvObj = NULL;
         if (!guid_eq(riid, &IID_IDirectInputDeviceA) &&
@@ -1104,19 +1246,6 @@ static BOOL load_real_dinput(void) {
     return g_real_DirectInputCreateA != NULL;
 }
 
-static void load_xinput(void) {
-    if (g_xinput) return;
-    g_xinput = load_system_library(L"xinput1_4.dll");
-    if (!g_xinput) g_xinput = load_system_library(L"xinput1_3.dll");
-    if (!g_xinput) g_xinput = load_system_library(L"xinput9_1_0.dll");
-    if (g_xinput) {
-        g_XInputGetState = (PFN_XInputGetState)GetProcAddress(g_xinput, "XInputGetState");
-        shim_log("XInput loaded (%p), GetState=%p", (void*)g_xinput, (void*)g_XInputGetState);
-    } else {
-        shim_log("XInput NOT available — no gamepad support");
-    }
-}
-
 /* ── Exported functions ───────────────────────────────────────────── */
 
 __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateA(HINSTANCE hinst, DWORD version,
@@ -1125,7 +1254,7 @@ __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateA(HINSTANCE hinst, DWORD
     if (!ppDI) return DIERR_INVALIDPARAM;
     *ppDI = NULL;
     if (!load_real_dinput()) return DIERR_NOTINITIALIZED;
-    load_xinput();
+    load_sdl();
 
     void* real_di = NULL;
     HRESULT_T hr = g_real_DirectInputCreateA(hinst, version, &real_di, pUnkOuter);
@@ -1161,7 +1290,7 @@ __declspec(dllexport) HRESULT_T WINAPI DirectInputCreateEx(HINSTANCE hinst, DWOR
     *ppvOut = NULL;
     if (!load_real_dinput()) return DIERR_NOTINITIALIZED;
     if (!g_real_DirectInputCreateEx) return DIERR_NOTINITIALIZED;
-    load_xinput();
+    load_sdl();
 
     void* real_di = NULL;
     HRESULT_T hr = g_real_DirectInputCreateEx(hinst, version, riid, &real_di, pUnkOuter);
@@ -1208,14 +1337,14 @@ int main(void) {
     int failed = 0;
     AxisConfig axis = {-1000, 1000, 2500};
     failed += test_check(configured_deadzone(&axis) == 8191,
-                         "DIPROP_DEADZONE converts to XInput units");
+                         "DIPROP_DEADZONE converts to stick units");
     failed += test_check(scale_axis(-32768, -1000, 1000) == -1000,
                          "negative axis scaling clamps to configured minimum");
     failed += test_check(scale_axis(-(LONG)apply_deadzone((SHORT)-32768, THUMB_DEADZONE),
                                     -1000, 1000) == 1000,
                          "full-down stick maps to the positive Y endpoint");
 
-    XInputDevice device;
+    GamepadDevice device;
     memset(&device, 0, sizeof(device));
     DIPROPDWORD deadzone = {
         {sizeof(DIPROPDWORD), sizeof(DIPROPHEADER), 0, DIPH_DEVICE}, 2500
@@ -1238,7 +1367,7 @@ int main(void) {
     DIDEVICEINSTANCEA info;
     memset(&info, 0, sizeof(info));
     info.dwSize = sizeof(info);
-    failed += test_check(fill_xinput_device_info(&info) == DI_OK,
+    failed += test_check(fill_gamepad_device_info(&info) == DI_OK,
                          "full DIDEVICEINSTANCE is accepted");
     failed += test_check(strcmp(info.tszProductName, "Xbox Controller") == 0,
                          "GetDeviceInfo fills the product name");
@@ -1248,6 +1377,27 @@ int main(void) {
     failed += test_check(xdev_QueryInterface(&device, &unsupported, &queried) ==
                              DIERR_NOINTERFACE && queried == NULL,
                          "unsupported device interfaces are rejected");
+
+    failed += test_check(flip_axis(-32768) == 32767 && flip_axis(32767) == -32767 &&
+                             flip_axis(0) == 0,
+                         "SDL down-positive Y converts to up-positive pad Y");
+    failed += test_check(trigger_byte(32767) == 255 && trigger_byte(0) == 0 &&
+                             trigger_byte(-1) == 0,
+                         "SDL trigger range converts to 0..255");
+    float carry_60 = 0.0f;
+    float carry_240 = 0.0f;
+    int pixels_60 = 0;
+    int pixels_240 = 0;
+    for (int i = 0; i < 60; ++i) pixels_60 += stick_mouse_pixels(&carry_60, 32767, 1.0f / 60.0f);
+    for (int i = 0; i < 240; ++i) pixels_240 += stick_mouse_pixels(&carry_240, 32767, 1.0f / 240.0f);
+    failed += test_check(pixels_60 >= 899 && pixels_60 <= 900 &&
+                             pixels_240 >= 899 && pixels_240 <= 900,
+                         "stick cursor speed does not depend on poll rate");
+    float carry_slow = 0.0f;
+    int pixels_slow = 0;
+    for (int i = 0; i < 240; ++i) pixels_slow += stick_mouse_pixels(&carry_slow, -3277, 1.0f / 240.0f);
+    failed += test_check(pixels_slow <= -89 && pixels_slow >= -90,
+                         "slow stick motion accumulates instead of rounding to zero");
 
     if (failed == 0) {
         puts("dinput logic tests passed");

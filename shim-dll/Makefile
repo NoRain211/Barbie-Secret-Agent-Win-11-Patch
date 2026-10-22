@@ -10,7 +10,7 @@ DDRAW_OUT = ddraw.dll
 DDRAW_SRC = src/main.c src/ddraw_proxy.c src/widescreen_fix.c src/menu_fix.c
 DDRAW_DEF = ddraw.def
 
-# dinput proxy (XInput gamepad support)
+# dinput proxy (SDL3 gamepad support)
 DINPUT_OUT = dinput.dll
 DINPUT_SRC = src/dinput_main.c
 DINPUT_DEF = dinput.def

@@ -1,3 +1,16 @@
+# Unreleased
+
+- Switched the gamepad bridge from XInput to SDL3. PlayStation, Switch, and
+  generic controllers now work, and any connected controller is used instead
+  of only XInput slot 0. Releases must include SDL 3.4.18 `SDL3.dll` (win32-x86).
+- Right-stick cursor speed no longer depends on frame rate.
+- The Alt+Tab surface-loss fix now applies at every resolution.
+- Launcher Max resolution uses the selected monitor's size.
+- The 1280x960 windowed resize no longer pushes the window off small screens.
+- The main-menu texture dump is developer-only; HD_UI overrides load from the
+  game folder.
+- Registry size queries and NULL-size calls now behave like Windows.
+
 # v1.2.0
 
 Native widescreen rendering, proportional UI, and cursor fixes.
