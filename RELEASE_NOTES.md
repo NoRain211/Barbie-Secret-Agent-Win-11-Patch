@@ -1,8 +1,10 @@
-# Unreleased
+# v1.3.0
+
+SDL3 gamepads, Alt+Tab recovery at every resolution, and monitor-aware sizing.
 
 - Switched the gamepad bridge from XInput to SDL3. PlayStation, Switch, and
   generic controllers now work, and any connected controller is used instead
-  of only XInput slot 0. Releases must include SDL 3.4.18 `SDL3.dll` (win32-x86).
+  of only XInput slot 0. The package now includes SDL 3.4.18 `SDL3.dll` (win32-x86).
 - Right-stick cursor speed no longer depends on frame rate.
 - The Alt+Tab surface-loss fix now applies at every resolution.
 - Launcher Max resolution uses the selected monitor's size.
@@ -10,6 +12,14 @@
 - The main-menu texture dump is developer-only; HD_UI overrides load from the
   game folder.
 - Registry size queries and NULL-size calls now behave like Windows.
+
+## Validation
+
+All shim regression probes, including the widescreen signature probe against
+SecretAgent.exe v1.0.0.1, launcher tests, `go vet` and CI pass. Probes confirmed
+the SDL3 bridge detects and reads an Xbox controller, and the DirectDraw hooks
+install on dgVoodoo2. A full play session with this build, analog stick motion,
+and PlayStation or Switch controllers on hardware are not yet confirmed.
 
 # v1.2.0
 

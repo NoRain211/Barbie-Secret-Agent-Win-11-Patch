@@ -1,188 +1,180 @@
-# Secret Agent Barbie — Windows 11 Compatibility Fix
+<div align="center">
 
-A reverse-engineered compatibility solution that makes **Secret Agent Barbie** (2001, Gigawatt Studios / Vivendi Universal) run natively on Windows 11 — no VMs, no dosbox, just a clean game directory.
+# Secret Agent Barbie Windows 11 Patch
 
-The game is verified playable from start to finish with this patch.
+**A drop-in compatibility patch that runs _Secret Agent Barbie_ (2001) natively on Windows 10 and 11, with native widescreen, a settings launcher and modern gamepad support.**
 
-## Quick Start
+[![Latest release](https://img.shields.io/github/v/release/NoRain211/Barbie-Secret-Agent-Win-11-Patch?label=release)](https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch/releases/latest)
+[![CI](https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch/actions/workflows/ci.yml/badge.svg)](https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch/actions/workflows/ci.yml)
+![Platform: Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6)
 
-1. Copy the game files from the CD/ISO into a normal writable folder (e.g. `C:\Games\Secret Agent Barbie`)
-2. Download the latest release zip and extract these files into the game folder
-   alongside `SecretAgent.exe`:
-   - `ddraw.dll` — our compatibility proxy
-   - `dinput.dll` — optional gamepad bridge for the game's native DirectInput support
-   - `SDL3.dll` — SDL3 runtime used by `dinput.dll` for gamepads (from [SDL 3.4.18](https://github.com/libsdl-org/SDL/releases/tag/release-3.4.18), win32-x86)
-   - `dgVoodoo_ddraw.dll` — dgVoodoo2 DDraw wrapper (from [dgVoodoo2 v2.86.5](https://github.com/dege-diosg/dgVoodoo2/releases))
-   - `D3DImm.dll` — dgVoodoo2 Direct3D wrapper
-   - `D3D8.dll` and `D3D9.dll` — dgVoodoo2 runtime companions
-   - `dgVoodoo.conf` — known-working dgVoodoo2 configuration
-3. Run `SecretAgent.exe`, or run `Secret Agent Barbie Launcher.exe` to adjust display settings first
+[Download](https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch/releases/latest) ·
+[Release notes](RELEASE_NOTES.md) ·
+[Technical notes](TECHNICAL.md) ·
+[Reversing notes](REVERSING.md) ·
+[Report a bug](https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch/issues)
 
-Do not run the game directly from the mounted ISO or CD. The patch DLLs must be
-in the same writable folder as the `SecretAgent.exe` that you launch. When the
-patch loads, it writes `ddraw_proxy.log` and `dinput_proxy.log` next to
-`SecretAgent.exe`.
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/norainsrecomps)
 
-No admin rights required. No registry changes needed. No installer.
+</div>
 
-## What It Does
+> [!IMPORTANT]
+> This project ships **no game files**. You need your own copy of the original
+> PC CD-ROM release. It is not affiliated with or endorsed by the game's rights
+> holders.
 
-The game was built for Windows 95/98 using DirectX 7 (DirectDraw + Direct3D 7). It fails on modern Windows for several reasons:
+## About
 
-| Problem | Symptom | Our Fix |
-|---------|---------|---------|
-| Missing registry keys | Instant crash (access violation) | IAT hook returns hardcoded defaults |
-| CD-ROM drive check | "Please insert CD-ROM" error | Fake `GetDriveTypeA` / `GetVolumeInformationA` |
-| DDraw/D3D7 rendering | Black screen, pixel format issues | Chain through dgVoodoo2 for DDraw/D3D7 to D3D11 translation |
-| Fixed 640x480 rendering | Stretched or pillarboxed 4:3 output | Patch native resolution, aspect ratio, and both camera FOV paths |
+The game was built for Windows 95/98 on DirectDraw 7 and Direct3D 7, and fails
+on modern Windows. The patch replaces `ddraw.dll` and `dinput.dll` in the game
+folder; the original executable on disk is never modified.
 
-## Architecture
+- `ddraw.dll` patches the game's imports to serve its missing registry values
+  and pass the CD-ROM check, applies the widescreen, UI and cursor fixes in
+  memory, and hands rendering to [dgVoodoo2](https://github.com/dege-diosg/dgVoodoo2)
+  for DirectDraw/Direct3D 7 to Direct3D 11 translation.
+- `dinput.dll` uses [SDL3](https://github.com/libsdl-org/SDL) to expose Xbox,
+  PlayStation, Switch and generic controllers through the game's native
+  DirectInput joystick support.
 
+No administrator rights, registry changes or installer are needed.
+
+## Status
+
+> [!NOTE]
+> **Fully playable.** The game has been completed from start to finish with the
+> patch. See [release notes](RELEASE_NOTES.md) for the validation limits of each
+> release.
+
+| Area | State |
+| --- | --- |
+| Startup, registry and CD-ROM checks | Working |
+| Menus, cutscenes (Cinepak) and audio | Working |
+| Keyboard and mouse | Working |
+| Alt+Tab recovery | Working at every resolution |
+| Native widescreen with Hor+ camera FOV | Working; cutscene letterboxing may differ outside 4:3 |
+| Proportional menus, edge-anchored action bar and radar | Working |
+| Xbox controllers through SDL3 | Detected and read in probes; full play session pending |
+| PlayStation, Switch and generic controllers | Supported by SDL3; not yet confirmed on hardware |
+| Ultrawide, outfit and camera/hook screens | Patch checks pass; full playthrough pending |
+
+## Play
+
+**Requirements:** Windows 10/11, the original game files and the
+[Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+for the launcher (preinstalled on Windows 11).
+
+1. Copy the game files from the CD or ISO into a normal writable folder, such as
+   `C:\Games\Secret Agent Barbie`. Do not run the game from the mounted disc.
+2. Download the ZIP from the [latest release](https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch/releases/latest) and extract
+   it into that folder, beside `SecretAgent.exe`.
+3. Run `Secret Agent Barbie Launcher.exe` to pick settings and press
+   **Launch Game**, or run `SecretAgent.exe` directly with the current settings.
+
+The patch writes `ddraw_proxy.log` and `dinput_proxy.log` beside
+`SecretAgent.exe`; include them in bug reports.
+
+### Package contents
+
+| File | Purpose |
+| --- | --- |
+| `ddraw.dll` | Compatibility, widescreen and UI patch |
+| `dinput.dll` | Gamepad bridge |
+| `SDL3.dll` | [SDL 3.4.18](https://github.com/libsdl-org/SDL/releases/tag/release-3.4.18) runtime for the gamepad bridge |
+| `dgVoodoo_ddraw.dll`, `D3DImm.dll`, `D3D8.dll`, `D3D9.dll` | [dgVoodoo2 v2.86.5](https://github.com/dege-diosg/dgVoodoo2/releases) renderer |
+| `dgVoodoo.conf` | Known-working dgVoodoo2 configuration |
+| `SecretAgentBarbieWidescreenFix.ini` | Resolution, FOV and launcher options |
+| `Secret Agent Barbie Launcher.exe` | Settings launcher |
+
+### Launcher
+
+| Setting | Effect |
+| --- | --- |
+| Resolution | Original, 1024x768, 1280x960, 1080p, 1440p or the selected monitor's native size |
+| Aspect ratio | Native (recommended), 4:3 pillarbox, stretch or centered |
+| Gameplay FOV multiplier | Adjustment on top of the corrected Hor+ FOV |
+| Monitor and fullscreen | Output monitor and fullscreen or windowed mode |
+| Skip intro videos and logos | Starts at the main menu; off by default. Gameplay cutscenes still play |
+| Automatic save backups | On by default; keeps the five latest ZIP snapshots of `Saves` in `SaveBackups`. A failed backup stops the launch |
+
+Settings are saved to `dgVoodoo.conf` and `SecretAgentBarbieWidescreenFix.ini`.
+Without the INI, the game uses the desktop resolution and a 1.0 FOV multiplier.
+
+### Controllers
+
+The game has native DirectInput gamepad support. The patch uses the first
+connected controller and switches to another one after a disconnect. The right
+stick moves the cursor, A sends Space, Start sends Escape, and B, X or the right
+trigger click. Without `SDL3.dll`, DirectInput is left unchanged. External
+mappers such as AntiMicroX, JoyToKey or Steam Input are a fallback only if a
+specific controller misbehaves.
+
+## Build from source
+
+The DLLs need 32-bit MinGW GCC (TDM-GCC or MSYS2 `mingw32`) and the launcher
+needs Go:
+
+```powershell
+git clone https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch.git
+cd Barbie-Secret-Agent-Win-11-Patch\shim-dll
+mingw32-make clean all test
+cd ..\launcher
+go test ./...
+go build -ldflags="-H=windowsgui" -o "Secret Agent Barbie Launcher.exe" .
 ```
-SecretAgent.exe
-    |
-    +-- loads "ddraw.dll" (our proxy, from game directory)
-    |   |
-    |   +-- IAT hooks: RegOpenKeyExA, RegQueryValueExA, RegCloseKey
-    |   |   (returns hardcoded registry values for game config)
-    |   |
-    |   +-- IAT hooks: GetDriveTypeA, GetVolumeInformationA
-    |   |   (bypasses CD-ROM check)
-    |   |
-    |   +-- Native widescreen patch
-    |   |   (resolution, aspect ratio, and Hor+ camera FOV)
-    |   |
-    |   +-- Loads "dgVoodoo_ddraw.dll" (dgVoodoo2, renamed)
-    |   |   (DDraw/D3D7 -> D3D11 rendering translation)
-    |   |
-    |   +-- Hooks IDirectDraw7 SetCooperativeLevel / SetDisplayMode
-    |       (2x window at the original resolution in windowed mode)
-    |
-    +-- D3DImm.dll (dgVoodoo2 Direct3D immediate mode)
-```
 
-## Verified Working
+The default build enables `SHIM_DEBUG`, so release DLLs write their logs. The
+widescreen probe in `mingw32-make test` runs only when
+`game-files/SecretAgent.exe` exists. CI builds and tests both parts on every
+push. Passing tests does not establish in-game behavior.
 
-- Main menu and all UI
-- Cutscenes (Cinepak codec, natively supported)
-- Audio (voices, music, sound effects)
-- Keyboard and mouse controls
-- Alt+Tab recovery
-- Native widescreen rendering with corrected Hor+ camera FOV
-- Native gamepad support through the DirectInput/SDL3 shim
-- Full game completion from start to finish
-- No admin rights required
+## Repository layout
 
-## Building the Proxy DLL
+| Path | Contents |
+| --- | --- |
+| [`shim-dll/`](shim-dll) | `ddraw.dll` and `dinput.dll` sources, headers, export definitions and regression probes |
+| [`launcher/`](launcher) | Go/WebView2 settings launcher and save backups |
+| [`config/`](config) | Release `dgVoodoo.conf` |
+| [`tools/`](tools) | Main-menu HD_UI tile reconstruction scripts |
+| [`TECHNICAL.md`](TECHNICAL.md) | Shim internals and how to reuse the approach for other games |
+| [`REVERSING.md`](REVERSING.md) | Reverse-engineering findings |
+| `game-files/` | Ignored local game install used for testing |
 
-Requires TDM-GCC or MinGW with 32-bit support:
+## Game details
 
-```bash
-cd shim-dll
-mingw32-make clean all
-mingw32-make test
-```
+| | |
+| --- | --- |
+| Developer / publisher | Gigawatt Studios / Vivendi Universal, 2001 |
+| Platform | Windows 95/98/2000/ME |
+| Engine | Gigawatt Engine (custom), 32-bit x86, MSVC 6.0 |
+| Graphics / audio / input | DirectDraw 7 + Direct3D 7 / DirectSound / DirectInput 1-7 |
+| Cutscenes | AVI (Cinepak) |
 
-The default Makefile build enables `SHIM_DEBUG` so release DLLs write
-`ddraw_proxy.log` and `dinput_proxy.log` during support triage.
-The widescreen probe in `mingw32-make test` runs only when
-`game-files/SecretAgent.exe` exists. The `dgVoodoo.conf` shipped in releases
-is kept in `config/`.
+## Contributing
 
-## Project Structure
+When [reporting a bug](https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch/issues), include the patch version, steps to
+reproduce, what happened, your Windows version, GPU and controller, and both log
+files. Never upload game files, saves or extracted assets.
 
-```
-barbie-secret-agent-re/
-+-- game-files/           # Game data (from CD/ISO)
-|   +-- SecretAgent.exe   # Original game executable
-|   +-- ddraw.dll         # Our proxy (built from shim-dll/)
-|   +-- dgVoodoo_ddraw.dll  # dgVoodoo2 DDraw wrapper
-|   +-- D3DImm.dll        # dgVoodoo2 D3D wrapper
-|   +-- D3D8.dll          # dgVoodoo2 D3D8 wrapper
-|   +-- D3D9.dll          # dgVoodoo2 D3D9 wrapper
-|   +-- Pak/              # Game data archives
-|   +-- Video/            # Cutscene AVIs (Cinepak)
-|   +-- Saves/            # Save data
-+-- shim-dll/
-|   +-- src/
-|   |   +-- main.c        # DllMain, export forwarders, registry + CD-ROM hooks
-|   |   +-- ddraw_proxy.c # DirectDrawCreateEx hook and windowed sizing
-|   |   +-- widescreen_fix.c # Native resolution/aspect/FOV patch
-|   |   +-- menu_fix.c    # UI scaling, cursor, and HD_UI menu overrides
-|   |   +-- dinput_main.c # DirectInput/SDL3 gamepad bridge
-|   +-- include/
-|   |   +-- shim_util.h      # Code-patching and game-path helpers
-|   |   +-- shim_log.h       # Logging utilities
-|   +-- tests/            # Native shim regression probes
-|   +-- ddraw.def         # DDraw export definitions
-+-- config/
-|   +-- dgVoodoo.conf     # Release dgVoodoo2 configuration
-+-- launcher/             # Go/WebView2 settings launcher
-+-- tools/                # Main-menu HD_UI tile reconstruction scripts
-+-- README.md             # This file
-+-- TECHNICAL.md          # Deep technical documentation
-+-- REVERSING.md          # Reverse engineering findings
-```
+## AI assistance
 
-## Launcher
+This project was built with large language models and AI coding agents for
+reverse engineering, code, debugging, tests and documentation: Claude as lead
+analyst, Codex as patch engineer, Kimi for DirectDraw/DirectInput analysis and
+Kilo for toolchain research and testing, coordinated through
+[AgentChattr](https://github.com/bcurts/agentchattr) with
+[GhidrAssistMCP](https://github.com/symgraph/GhidrAssistMCP). Their output can
+contain mistakes; changes are reviewed and tested, and unverified behavior is
+tracked as such.
 
-Double-click `Secret Agent Barbie Launcher.exe` in the game folder for a settings menu:
+## License
 
-- **Resolution** — Original, 1024x768, 1080p, 1440p, or native max
-- **Aspect Ratio** — native aspect ratio (recommended), 4:3 pillarbox, stretch, or centered
-- **Gameplay FOV multiplier** — optional adjustment on top of corrected Hor+ FOV
-- **Display Mode** — Fullscreen or windowed
-- **Skip intro videos and logos** — start at the main menu; off by default.
-  Requires the accompanying updated `ddraw.dll`. Gameplay cutscenes are unchanged.
-- **Automatic save backups** — on by default; keeps the five latest pre-launch
-  ZIP snapshots of the complete `Saves` folder in `SaveBackups`. Backups only run
-  when starting through the launcher. A failed backup stops launch and shows an error.
-
-Settings are saved to `dgVoodoo.conf` and
-`SecretAgentBarbieWidescreenFix.ini` before launching. A missing widescreen INI
-defaults to the current desktop resolution and a 1.0 gameplay FOV multiplier.
-
-The 3D game and camera render natively at the selected aspect ratio. Menus use
-proportional scaling, while the action bar and radar stay anchored to the screen
-edges. Camera/hook backgrounds and the post-intro splash fill the screen.
-Cutscene letterboxing may differ outside 4:3. See the validation limits in
-[RELEASE_NOTES.md](RELEASE_NOTES.md).
-
-## Gamepad Support
-
-The game has native DirectInput gamepad support. The `dinput.dll`
-shim uses SDL3 to expose the first connected Xbox, PlayStation, Switch, or
-generic controller through the legacy DirectInput path, so the game's own
-controller support works on Windows 10/11. `SDL3.dll` must sit beside
-`SecretAgent.exe`; without it the shim leaves DirectInput unchanged.
-
-External mappers such as AntiMicroX, JoyToKey, or Steam Input are fallback
-options only if a specific controller does not behave correctly.
-
-## Game Details
-
-- **Title:** Secret Agent(tm) Barbie(tm)
-- **Developer:** Gigawatt Studios
-- **Publisher:** Vivendi Universal
-- **Year:** 2001
-- **Engine:** Gigawatt Engine (custom)
-- **Platform:** Windows 95/98/2000/ME
-- **Graphics:** DirectDraw 7 + Direct3D 7
-- **Audio:** DirectSound
-- **Input:** DirectInput 1-7
-- **Cutscenes:** AVI (Cinepak codec)
-- **Binary:** 32-bit x86 PE, MSVC 6.0, ~6MB
-
-## Credits
-
-Reverse engineered and patched by a multi-agent team:
-- **Claude (Opus 4.6)** — Lead analyst, architecture, Ghidra RE, code review
-- **Codex (GPT-5.3-Spark)** — Patch engineer, wrote all proxy C code
-- **Kimi (K2.5)** — DDraw/DInput pipeline analysis, vtable mapping
-- **Kilo** — Toolchain research, compatibility testing, MCI analysis
-
-Built using [AgentChattr](https://github.com/bcurts/agentchattr) for multi-agent coordination, [GhidrAssistMCP](https://github.com/symgraph/GhidrAssistMCP) for Ghidra integration, and [dgVoodoo2](https://github.com/dege-diosg/dgVoodoo2) for rendering translation.
-
-Native widescreen patch signatures and behavior are based on AlphaYellow's
+The native widescreen signatures and behavior are based on AlphaYellow's
 [SecretAgentBarbieWidescreenFix](https://github.com/alphayellow1/AlphaYellowWidescreenFixes)
-under the MIT License. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+(MIT). dgVoodoo2 and SDL3 keep their own licenses; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Nothing here grants rights to
+the game or its assets.
+
+## Support
+
+If you like this work, consider [buying me a coffee on Ko-fi](https://ko-fi.com/norainsrecomps).
