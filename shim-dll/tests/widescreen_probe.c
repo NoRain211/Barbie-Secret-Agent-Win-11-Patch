@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
       fprintf(stderr, "intro skip modified unrelated bytes\n");
       valid = false;
     }
-    const size_t splash_signatures[] = {0x000F490C, 0x000F4930, 0x00061F30, 0x000B59F0};
+    const size_t splash_signatures[] = {0x000F490C, 0x000F4930, 0x00061F30};
     for (size_t i = 0; i < sizeof(splash_signatures) / sizeof(splash_signatures[0]); ++i) {
       writable[splash_signatures[i]] ^= 1;
       if (widescreen_fix_verify_image(writable, nt->OptionalHeader.SizeOfImage)) {
@@ -86,7 +86,18 @@ int main(int argc, char** argv) {
     }
     valid = valid && widescreen_fix_test_apply_resolution(
                          writable, nt->OptionalHeader.SizeOfImage, 2560, 1440);
-    if (writable[0xB59F0] != 0xE9) {
+    if (writable[0xB59F0] != 0x8B) {
+      fprintf(stderr, "resolution patch touched the surface-loss guard site\n");
+      valid = false;
+    }
+    writable[0xB59F1] ^= 1;
+    if (widescreen_fix_test_surface_loss(writable, nt->OptionalHeader.SizeOfImage)) {
+      fprintf(stderr, "surface-loss guard accepted an unknown signature\n");
+      valid = false;
+    }
+    writable[0xB59F1] ^= 1;
+    if (!widescreen_fix_test_surface_loss(writable, nt->OptionalHeader.SizeOfImage) ||
+        writable[0xB59F0] != 0xE9) {
       fprintf(stderr, "shared surface-loss guard was not installed\n");
       valid = false;
     } else {

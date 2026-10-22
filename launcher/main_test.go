@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -125,6 +126,40 @@ func TestWidescreenConfig(t *testing.T) {
 	}
 	if err := loadWidescreenConfig(path, &loaded); err != nil || loaded.Resolution != "unforced" || !loaded.SkipIntro {
 		t.Fatalf("original resolution lost launcher options: %+v, %v", loaded, err)
+	}
+}
+
+func TestMaxResolutionUsesSelectedMonitor(t *testing.T) {
+	monitors := detectMonitors()
+	if len(monitors) < 2 {
+		t.Skip("no monitor detected")
+	}
+	selected := monitors[len(monitors)-1]
+	if selected.width < 640 || selected.height < 480 {
+		t.Fatalf("monitor %q has no usable display mode: %dx%d", selected.Label, selected.width, selected.height)
+	}
+	path := filepath.Join(t.TempDir(), "SecretAgentBarbieWidescreenFix.ini")
+	cfg := defaultConfig()
+	cfg.Monitor = selected.Value
+	if err := saveWidescreenConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Width=" + strconv.Itoa(selected.width), "Height=" + strconv.Itoa(selected.height)} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("max on %s missing %q in:\n%s", selected.Label, want, data)
+		}
+	}
+
+	cfg.Monitor = "default"
+	if err := saveWidescreenConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(path); !strings.Contains(string(data), "Width=0\n") {
+		t.Errorf("default monitor should leave max to the shim: %s", data)
 	}
 }
 

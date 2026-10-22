@@ -41,7 +41,6 @@ typedef struct {
   uint8_t* menu_resolution;
   uint8_t* splash_calls[2];
   uint8_t* fullscreen_bitmap;
-  uint8_t* record_error;
 } patch_sites_t;
 
 static const char* const k_resolution_patterns[] = {
@@ -189,14 +188,6 @@ static bool find_patch_sites(uint8_t* base, size_t size, patch_sites_t* sites) {
       memcmp(base + FULLSCREEN_BITMAP_RVA, fullscreen_signature,
              sizeof(fullscreen_signature)) != 0) return false;
   sites->fullscreen_bitmap = base + FULLSCREEN_BITMAP_RVA;
-  const uint8_t error_signature[] = {
-      0x8B, 0x41, 0x04, 0x85, 0xC0, 0x75, 0x15, 0x8B, 0x44, 0x24, 0x04,
-      0x85, 0xC0, 0x75, 0x0A, 0xC7, 0x41, 0x04, 0x00, 0x00, 0x00, 0xE0,
-      0xC2, 0x04, 0x00, 0x89, 0x41, 0x04, 0xC2, 0x04, 0x00};
-  if (RECORD_ERROR_RVA + sizeof(error_signature) > size ||
-      memcmp(base + RECORD_ERROR_RVA, error_signature,
-             sizeof(error_signature)) != 0) return false;
-  sites->record_error = base + RECORD_ERROR_RVA;
   const uint8_t splash_signatures[2][5] = {
       {0x8B, 0x01, 0xFF, 0x50, 0x60},
       {0x8B, 0x11, 0xFF, 0x52, 0x60}};
@@ -285,6 +276,20 @@ __attribute__((thiscall)) static void record_error_hook(uint32_t* object, uint32
      DDERR_SURFACELOST here disables both bitmaps and the renderer forever. */
   if (error == 0x887601C2u || object[1] != 0) return;
   object[1] = error != 0 ? error : 0xE0000000u;
+}
+
+/* Installed at every resolution: Alt+Tab surface loss is not a widescreen issue. */
+static bool apply_surface_loss_fix(void* image, size_t image_size) {
+  uint8_t* base;
+  size_t size;
+  const uint8_t signature[] = {
+      0x8B, 0x41, 0x04, 0x85, 0xC0, 0x75, 0x15, 0x8B, 0x44, 0x24, 0x04,
+      0x85, 0xC0, 0x75, 0x0A, 0xC7, 0x41, 0x04, 0x00, 0x00, 0x00, 0xE0,
+      0xC2, 0x04, 0x00, 0x89, 0x41, 0x04, 0xC2, 0x04, 0x00};
+  if (!get_image_bounds(image, image_size, &base, &size) ||
+      RECORD_ERROR_RVA + sizeof(signature) > size ||
+      memcmp(base + RECORD_ERROR_RVA, signature, sizeof(signature)) != 0) return false;
+  return install_jump(base + RECORD_ERROR_RVA, 5, record_error_hook);
 }
 
 __attribute__((used, noinline)) static float adjust_overall_fov(float current) {
@@ -391,7 +396,6 @@ static bool load_settings(int* width, int* height) {
 
 static bool apply_resolution_and_aspect(const patch_sites_t* sites,
                                         int width, int height) {
-  if (!install_jump(sites->record_error, 5, record_error_hook)) return false;
   const size_t width_offsets[] = {6, 6, 6, 3, 3, 1, 8};
   const size_t height_offsets[] = {1, 1, 1, 19, 19, 29, 1};
   for (size_t i = 0; i < 7; ++i) {
@@ -452,8 +456,10 @@ bool widescreen_fix_init(void) {
     bool skipped = apply_skip_intro(image, mapped_size, true);
     shim_log("Skip intro: %s", skipped ? "enabled" : "signature mismatch; left unchanged");
   }
+  shim_log("Surface-loss guard: %s", apply_surface_loss_fix(image, mapped_size)
+                                          ? "installed" : "signature mismatch; left unchanged");
 
-  /* Intro skipping also works with the original 640x480 resolution. */
+  /* Intro skipping and the surface-loss guard also work at the original 640x480. */
   int width;
   int height;
   if (!load_settings(&width, &height)) {
@@ -493,6 +499,10 @@ bool widescreen_fix_get_resolution(int* width, int* height) {
 #ifdef WIDESCREEN_TEST
 bool widescreen_fix_test_skip_intro(void* image, size_t image_size, bool enabled) {
   return apply_skip_intro(image, image_size, enabled);
+}
+
+bool widescreen_fix_test_surface_loss(void* image, size_t image_size) {
+  return apply_surface_loss_fix(image, image_size);
 }
 
 bool widescreen_fix_verify_image(const void* image, size_t image_size) {

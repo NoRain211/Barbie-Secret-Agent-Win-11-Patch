@@ -562,11 +562,19 @@ static HRESULT WINAPI proxy_SetDisplayMode(ProxyIDirectDraw7* this_ptr, DWORD dw
     AdjustWindowRectEx(&rc, style, FALSE, exstyle);
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
-    int sx = GetSystemMetrics(SM_CXSCREEN);
-    int sy = GetSystemMetrics(SM_CYSCREEN);
-    SetWindowPos(this_ptr->game_hwnd, NULL, (sx - w) / 2, (sy - h) / 2, w, h,
-                 SWP_NOZORDER | SWP_NOACTIVATE);
-    shim_log("SetDisplayMode: resized window to 1280x960 centered");
+    MONITORINFO monitor = {.cbSize = sizeof(monitor)};
+    const RECT* work = &monitor.rcWork;
+    if (GetMonitorInfoA(MonitorFromWindow(this_ptr->game_hwnd, MONITOR_DEFAULTTONEAREST),
+                        &monitor) &&
+        w <= work->right - work->left && h <= work->bottom - work->top) {
+      SetWindowPos(this_ptr->game_hwnd, NULL,
+                   work->left + (work->right - work->left - w) / 2,
+                   work->top + (work->bottom - work->top - h) / 2, w, h,
+                   SWP_NOZORDER | SWP_NOACTIVATE);
+      shim_log("SetDisplayMode: resized window to 1280x960 centered");
+    } else {
+      shim_log("SetDisplayMode: 1280x960 window does not fit the monitor; size kept");
+    }
   }
 
   if (FAILED(result) && (dwWidth != 640 || dwHeight != 480 || dwBPP != 16)) {

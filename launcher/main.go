@@ -26,6 +26,7 @@ var (
 	user32                  = syscall.NewLazyDLL("user32.dll")
 	procEnumDisplayMonitors = user32.NewProc("EnumDisplayMonitors")
 	procGetMonitorInfoW     = user32.NewProc("GetMonitorInfoW")
+	procEnumDisplaySettings = user32.NewProc("EnumDisplaySettingsW")
 )
 
 type monitorInfoEx struct {
@@ -34,6 +35,16 @@ type monitorInfoEx struct {
 	rcWork    struct{ left, top, right, bottom int32 }
 	dwFlags   uint32
 	szDevice  [32]uint16
+}
+
+// devMode is DEVMODEW reduced to the fields the launcher reads.
+type devMode struct {
+	_          [68]byte
+	size       uint16
+	_          [102]byte
+	pelsWidth  uint32
+	pelsHeight uint32
+	_          [40]byte
 }
 
 type monitorScan struct {
@@ -62,6 +73,13 @@ var monitorEnumCallback = syscall.NewCallback(func(hMonitor, _, _, lParam uintpt
 
 	w := info.rcMonitor.right - info.rcMonitor.left
 	h := info.rcMonitor.bottom - info.rcMonitor.top
+	// The launcher is not DPI-aware, so rcMonitor can be scaled; the display mode is not.
+	mode := devMode{size: uint16(unsafe.Sizeof(devMode{}))}
+	const enumCurrentSettings = 0xFFFFFFFF
+	if result, _, _ := procEnumDisplaySettings.Call(uintptr(unsafe.Pointer(&info.szDevice[0])),
+		enumCurrentSettings, uintptr(unsafe.Pointer(&mode))); result != 0 {
+		w, h = int32(mode.pelsWidth), int32(mode.pelsHeight)
+	}
 	primary := ""
 	if info.dwFlags&1 != 0 {
 		primary = " (Primary)"
@@ -69,6 +87,7 @@ var monitorEnumCallback = syscall.NewCallback(func(hMonitor, _, _, lParam uintpt
 	*scan.monitors = append(*scan.monitors, monitor{
 		Label: fmt.Sprintf("Monitor %d%s - %dx%d", scan.index, primary, w, h),
 		Value: strconv.Itoa(scan.index),
+		width: int(w), height: int(h),
 	})
 	return 1
 })
@@ -98,8 +117,9 @@ type config struct {
 }
 
 type monitor struct {
-	Label string `json:"label"`
-	Value string `json:"value"`
+	Label         string `json:"label"`
+	Value         string `json:"value"`
+	width, height int
 }
 
 var (
@@ -669,6 +689,14 @@ func widescreenDimensions(resolution string) (width, height int, enabled bool) {
 
 func saveWidescreenConfig(path string, cfg config) error {
 	width, height, enabled := widescreenDimensions(cfg.Resolution)
+	if cfg.Resolution == "max" && cfg.Monitor != "default" {
+		// The shim's own fallback reads the primary display, which is wrong on other monitors.
+		for _, m := range detectMonitors() {
+			if m.Value == cfg.Monitor {
+				width, height = m.width, m.height
+			}
+		}
+	}
 	contents := fmt.Sprintf("[Fix]\nEnabled=%t\n\n[Settings]\nWidth=%d\nHeight=%d\nFOVFactor=%s\n",
 		enabled, width, height, strconv.FormatFloat(cfg.FOVFactor, 'f', 3, 64))
 	contents += fmt.Sprintf("\n[Launcher]\nSkipIntro=%t\nBackupSaves=%t\n", cfg.SkipIntro, cfg.BackupSaves)
