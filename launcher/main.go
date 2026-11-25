@@ -10,99 +10,11 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
-	"unsafe"
-
-	"github.com/jchv/go-webview2"
 )
-
-var (
-	user32                  = syscall.NewLazyDLL("user32.dll")
-	procEnumDisplayMonitors = user32.NewProc("EnumDisplayMonitors")
-	procGetMonitorInfoW     = user32.NewProc("GetMonitorInfoW")
-	procEnumDisplaySettings = user32.NewProc("EnumDisplaySettingsW")
-)
-
-type monitorInfoEx struct {
-	cbSize    uint32
-	rcMonitor struct{ left, top, right, bottom int32 }
-	rcWork    struct{ left, top, right, bottom int32 }
-	dwFlags   uint32
-	szDevice  [32]uint16
-}
-
-// devMode is DEVMODEW reduced to the fields the launcher reads.
-type devMode struct {
-	_          [68]byte
-	size       uint16
-	_          [102]byte
-	pelsWidth  uint32
-	pelsHeight uint32
-	_          [40]byte
-}
-
-type monitorScan struct {
-	monitors *[]monitor
-	index    int
-}
-
-var (
-	monitorScanMu     sync.Mutex
-	activeMonitorScan *monitorScan
-)
-
-var monitorEnumCallback = syscall.NewCallback(func(hMonitor, _, _, lParam uintptr) uintptr {
-	_ = lParam
-	scan := activeMonitorScan
-	if scan == nil {
-		return 0
-	}
-	scan.index++
-
-	var info monitorInfoEx
-	info.cbSize = uint32(unsafe.Sizeof(info))
-	if result, _, _ := procGetMonitorInfoW.Call(hMonitor, uintptr(unsafe.Pointer(&info))); result == 0 {
-		return 1
-	}
-
-	w := info.rcMonitor.right - info.rcMonitor.left
-	h := info.rcMonitor.bottom - info.rcMonitor.top
-	// The launcher is not DPI-aware, so rcMonitor can be scaled; the display mode is not.
-	mode := devMode{size: uint16(unsafe.Sizeof(devMode{}))}
-	const enumCurrentSettings = 0xFFFFFFFF
-	if result, _, _ := procEnumDisplaySettings.Call(uintptr(unsafe.Pointer(&info.szDevice[0])),
-		enumCurrentSettings, uintptr(unsafe.Pointer(&mode))); result != 0 {
-		w, h = int32(mode.pelsWidth), int32(mode.pelsHeight)
-	}
-	primary := ""
-	if info.dwFlags&1 != 0 {
-		primary = " (Primary)"
-	}
-	*scan.monitors = append(*scan.monitors, monitor{
-		Label: fmt.Sprintf("Monitor %d%s - %dx%d", scan.index, primary, w, h),
-		Value: strconv.Itoa(scan.index),
-		width: int(w), height: int(h),
-	})
-	return 1
-})
-
-func detectMonitors() []monitor {
-	monitorScanMu.Lock()
-	defer monitorScanMu.Unlock()
-
-	monitors := []monitor{{Label: "Default", Value: "default"}}
-	scan := monitorScan{monitors: &monitors}
-	activeMonitorScan = &scan
-	defer func() { activeMonitorScan = nil }()
-	procEnumDisplayMonitors.Call(0, 0, monitorEnumCallback, 0)
-	return monitors
-}
 
 type config struct {
 	Resolution  string    `json:"resolution"`
@@ -127,7 +39,6 @@ var (
 	confPath       string
 	widescreenPath string
 	token          string
-	wv             webview2.WebView
 )
 
 func main() {
@@ -157,6 +68,7 @@ func main() {
 	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/api/config", handleConfig)
 	mux.HandleFunc("/api/launch", handleLaunch)
+	mux.HandleFunc("/api/ping", handlePing)
 	server := &http.Server{Handler: mux}
 	defer server.Close()
 	go func() {
@@ -165,24 +77,10 @@ func main() {
 		}
 	}()
 
-	wv = webview2.NewWithOptions(webview2.WebViewOptions{
-		Debug:     false,
-		AutoFocus: true,
-		WindowOptions: webview2.WindowOptions{
-			Title:  "Secret Agent Barbie",
-			Width:  480,
-			Height: 720,
-			Center: true,
-		},
-	})
-	if wv == nil {
-		fmt.Fprintln(os.Stderr, "Failed to create webview2 window")
+	if err := runUI(fmt.Sprintf("http://127.0.0.1:%d/?token=%s", port, token)); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	defer wv.Destroy()
-
-	wv.Navigate(fmt.Sprintf("http://127.0.0.1:%d/?token=%s", port, token))
-	wv.Run()
 }
 
 func newToken() (string, error) {
@@ -211,6 +109,18 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(launcherHTML))
+}
+
+func handlePing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !authorize(w, r) {
+		return
+	}
+	notePing()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -274,7 +184,7 @@ func handleLaunch(w http.ResponseWriter, r *http.Request) {
 	// Close the window after a brief delay
 	go func() {
 		time.Sleep(250 * time.Millisecond)
-		wv.Dispatch(func() { wv.Destroy() })
+		closeUI()
 	}()
 }
 
@@ -296,9 +206,12 @@ func launchGame(dir string, backup bool) error {
 			return fmt.Errorf("save backup failed (fix the error or turn off Automatic save backups): %w", err)
 		}
 	}
-	cmd := exec.Command(gamePath)
+	cmd, err := gameCommand(gamePath)
+	if err != nil {
+		return err
+	}
 	cmd.Dir = dir
-	return cmd.Start()
+	return startGame(cmd)
 }
 
 const launcherHTML = `<!DOCTYPE html>
@@ -428,7 +341,7 @@ const launcherHTML = `<!DOCTYPE html>
 <body>
   <div class="header">
     <h1>Secret Agent Barbie</h1>
-    <div class="subtitle">Win11 Compatibility Launcher</div>
+    <div class="subtitle">Compatibility Launcher</div>
   </div>
   <div class="card">
     <div class="field">
@@ -477,11 +390,15 @@ const launcherHTML = `<!DOCTYPE html>
     <button id="launch" class="launch-btn" onclick="launchGame()">LAUNCH GAME</button>
     <div id="status" class="status" role="status"></div>
   </div>
-  <div class="footer">Operation Pink — Win11 Compatibility Project</div>
+  <div class="footer">Operation Pink — Compatibility Project</div>
 <script>
   const token = new URLSearchParams(location.search).get('token');
   const api = path => path + '?token=' + encodeURIComponent(token || '');
   const statusEl = document.getElementById('status');
+  // Lets a browser-hosted launcher (Linux) exit once its window is closed.
+  const ping = () => fetch(api('/api/ping'), {method: 'POST'}).catch(() => {});
+  ping();
+  setInterval(ping, 2000);
 
   fetch(api('/api/config')).then(r => r.json()).then(cfg => {
     document.getElementById('resolution').value = cfg.resolution || 'unforced';
@@ -523,7 +440,7 @@ const launcherHTML = `<!DOCTYPE html>
       });
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.error || 'Launch failed');
-      statusEl.textContent = 'Game launched.';
+      statusEl.textContent = 'Game launched. You can close this window.';
     } catch (err) {
       statusEl.textContent = err.message;
       button.disabled = false;

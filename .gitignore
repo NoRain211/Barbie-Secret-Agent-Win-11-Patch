@@ -18,6 +18,7 @@ GsLibErr.tsf
 shim-dll/build/
 shim-dll/*.dll
 launcher/*.exe
+launcher/secret-agent-barbie-launcher
 release/
 dist/
 *.zip

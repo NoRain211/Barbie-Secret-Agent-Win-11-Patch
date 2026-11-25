@@ -194,7 +194,7 @@ API so diagnostics do not change shutdown behavior.
 
 ### Makefile
 
-`shim-dll/Makefile` provides a simpler default build (`CC=gcc`, `-m32`, shared output, `SHIM_DEBUG` enabled). Its recipes run in `cmd.exe`. Run `mingw32-make test` to build both DLLs and execute the registry-hook, DirectInput logic, menu-fix, and black-box DDraw/DInput ABI probes. The widescreen probe also runs when `game-files/SecretAgent.exe` is present. GitHub Actions runs the same suite plus the launcher tests.
+`shim-dll/Makefile` provides a simpler default build (`CC=gcc`, `-m32`, shared output, `SHIM_DEBUG` enabled). On Windows its recipes run in `cmd.exe`; on Linux it cross-compiles with `i686-w64-mingw32-gcc` and runs the probes under Wine with `WINEDLLOVERRIDES="ddraw,dinput=n,b"` (Wine otherwise loads its builtin DLLs even for explicit paths). Run `mingw32-make test` (or `make test` on Linux) to build both DLLs and execute the registry-hook, DirectInput logic, menu-fix, and black-box DDraw/DInput ABI probes. The widescreen probe also runs when `game-files/SecretAgent.exe` is present. GitHub Actions runs the same suite plus the launcher tests on Windows and Linux.
 
 Building with `-DMENU_FIX_DUMP_TEXTURES` makes the shim write the main-menu tiles to `HD_UI\Extracted` for the `tools/` scripts. Release builds only read `HD_UI\Override` from the game folder.
 
