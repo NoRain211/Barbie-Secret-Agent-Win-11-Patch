@@ -1,6 +1,17 @@
-# Recipes use cmd syntax, even when Git's sh.exe is on PATH.
+# Windows builds use MinGW GCC directly and cmd recipes, even when Git's sh.exe
+# is on PATH. Elsewhere (Linux), the DLLs are cross-compiled with the i686
+# MinGW-w64 toolchain and the probes run under Wine.
+ifeq ($(OS),Windows_NT)
 SHELL = cmd.exe
 CC = gcc
+RUN =
+else
+CC = i686-w64-mingw32-gcc
+WINE ?= wine
+# Wine prefers its builtin ddraw/dinput even for explicit paths. Native first
+# loads the shims; the builtin fallback is the "system" DLL they forward to.
+RUN = WINEDEBUG=-all WINEDLLOVERRIDES="ddraw,dinput=n,b" $(WINE)
+endif
 CFLAGS ?= -std=gnu11 -Wall -Wextra -O2 -m32 -DINITGUID -DSHIM_DEBUG -Iinclude
 LDFLAGS ?= -shared
 LDLIBS ?= -lole32 -luuid -lm
@@ -33,7 +44,11 @@ $(DINPUT_OUT): $(DINPUT_SRC)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(DINPUT_DEF) $(LDLIBS) -Wl,--enable-stdcall-fixup
 
 $(TEST_DIR):
+ifeq ($(OS),Windows_NT)
 	if not exist "$(TEST_DIR)" mkdir "$(TEST_DIR)"
+else
+	mkdir -p $(TEST_DIR)
+endif
 
 $(REGISTRY_PROBE): tests/registry_hook_probe.c | $(TEST_DIR)
 	$(CC) -std=gnu11 -Wall -Wextra -O2 -m32 -o $@ $<
@@ -57,16 +72,20 @@ $(MENU_FIX_PROBE): tests/menu_fix_probe.c src/menu_fix.c | $(TEST_DIR)
 		-Iinclude -o $@ $^ $(LDLIBS)
 
 test: all $(REGISTRY_PROBE) $(DDRAW_ABI_PROBE) $(DINPUT_LOGIC_PROBE) $(DINPUT_ABI_PROBE) $(WIDESCREEN_PROBE) $(MENU_FIX_PROBE)
-	$(REGISTRY_PROBE) ./$(DDRAW_OUT)
-	$(DDRAW_ABI_PROBE) ./$(DDRAW_OUT)
-	$(DINPUT_LOGIC_PROBE)
-	$(DINPUT_ABI_PROBE) ./$(DINPUT_OUT)
-	$(MENU_FIX_PROBE)
-	$(if $(wildcard $(GAME_EXE)),$(WIDESCREEN_PROBE) $(GAME_EXE),@echo Skipped widescreen probe: $(GAME_EXE) not found)
+	$(RUN) $(REGISTRY_PROBE) ./$(DDRAW_OUT)
+	$(RUN) $(DDRAW_ABI_PROBE) ./$(DDRAW_OUT)
+	$(RUN) $(DINPUT_LOGIC_PROBE)
+	$(RUN) $(DINPUT_ABI_PROBE) ./$(DINPUT_OUT)
+	$(RUN) $(MENU_FIX_PROBE)
+	$(if $(wildcard $(GAME_EXE)),$(RUN) $(WIDESCREEN_PROBE) $(GAME_EXE),@echo Skipped widescreen probe: $(GAME_EXE) not found)
 
 clean:
+ifeq ($(OS),Windows_NT)
 	-if exist $(DDRAW_OUT) del /q $(DDRAW_OUT)
 	-if exist $(DINPUT_OUT) del /q $(DINPUT_OUT)
 	-if exist build rmdir /s /q build
+else
+	rm -rf $(DDRAW_OUT) $(DINPUT_OUT) build
+endif
 
 .PHONY: all test clean

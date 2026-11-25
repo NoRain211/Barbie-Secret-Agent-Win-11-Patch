@@ -32,3 +32,34 @@ jobs:
         run: |
           $env:PATH = "${{ steps.msys2.outputs.msys2-location }}\mingw32\bin;$env:PATH"
           mingw32-make all test
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Launcher vet and tests
+        working-directory: launcher
+        run: |
+          go vet ./...
+          go test ./...
+          GOOS=windows go vet ./...
+          CGO_ENABLED=0 go build -o secret-agent-barbie-launcher .
+
+      - name: Install MinGW-w64 and Wine
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-i686 make wine wine32:i386
+
+      # Cross-compiles the DLLs and runs the same probes under Wine.
+      - name: Shim build and probes
+        working-directory: shim-dll
+        env:
+          WINEPREFIX: ${{ runner.temp }}/wineprefix
+        run: |
+          WINEDLLOVERRIDES="mscoree,mshtml=" wineboot -i
+          make all test

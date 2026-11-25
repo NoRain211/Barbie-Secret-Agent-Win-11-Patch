@@ -2,11 +2,11 @@
 
 # Secret Agent Barbie Windows 11 Patch
 
-**A drop-in compatibility patch that runs _Secret Agent Barbie_ (2001) natively on Windows 10 and 11, with native widescreen, a settings launcher and modern gamepad support.**
+**A drop-in compatibility patch that runs _Secret Agent Barbie_ (2001) on Windows 10 and 11 and on Linux through Wine, with native widescreen, a settings launcher and modern gamepad support.**
 
 [![Latest release](https://img.shields.io/github/v/release/NoRain211/Barbie-Secret-Agent-Win-11-Patch?label=release)](https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch/releases/latest)
 [![CI](https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch/actions/workflows/ci.yml/badge.svg)](https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch/actions/workflows/ci.yml)
-![Platform: Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6)
+![Platform: Windows 10/11 | Linux (Wine)](https://img.shields.io/badge/platform-Windows%2010%2F11%20%7C%20Linux%20(Wine)-0078D6)
 
 [Download](https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch/releases/latest) ·
 [Release notes](RELEASE_NOTES.md) ·
@@ -74,6 +74,43 @@ for the launcher (preinstalled on Windows 11).
 The patch writes `ddraw_proxy.log` and `dinput_proxy.log` beside
 `SecretAgent.exe`; include them in bug reports.
 
+### Linux
+
+The game and the patch DLLs are Windows programs, so on Linux they run under
+[Wine](https://www.winehq.org/) (Wine 9 or newer with 32-bit support, or a WoW64
+build). The Linux launcher is a native program that saves the same settings and
+starts the game through Wine.
+
+1. Install Wine. For dgVoodoo2's Direct3D 11 output,
+   [DXVK](https://github.com/doitsujin/dxvk) in the Wine prefix is recommended;
+   Wine's own Direct3D 11 also works but is slower.
+2. Copy the game files into a writable folder, such as
+   `~/Games/Secret Agent Barbie`, and extract the release ZIP beside
+   `SecretAgent.exe` as on Windows.
+3. Put `secret-agent-barbie-launcher` in the same folder and run it.
+
+The launcher opens its window with Chromium, Chrome, Brave, Edge or Vivaldi in
+app mode when one is installed, or otherwise in the default browser. It runs the
+game with `WINEDLLOVERRIDES="ddraw,dinput,d3dimm=n,b"` so Wine loads the patch
+and dgVoodoo2 instead of its builtin DLLs, and writes Wine's output to `wine.log`.
+
+| Variable | Effect |
+| --- | --- |
+| `WINE` | Wine executable or compatible runner to use; defaults to `wine` on `PATH` |
+| `WINEPREFIX` | Wine prefix to run the game in; defaults to Wine's own |
+| `WINEDLLOVERRIDES`, `WINEDEBUG` | Extra overrides are appended; `WINEDEBUG` defaults to `-all` |
+| `BARBIE_LAUNCHER_BROWSER` | Browser to open the launcher window with, in Chromium `--app` mode |
+
+To start the game without the launcher:
+
+```sh
+WINEDLLOVERRIDES="ddraw,dinput,d3dimm=n,b" wine SecretAgent.exe
+```
+
+Monitor numbers come from `xrandr` with the primary monitor first, matching
+Wine's order. Deleting `dgVoodoo_ddraw.dll` makes the patch fall back to Wine's
+builtin DirectDraw.
+
 ### Package contents
 
 | File | Purpose |
@@ -111,8 +148,10 @@ specific controller misbehaves.
 
 ## Build from source
 
-The DLLs need 32-bit MinGW GCC (TDM-GCC or MSYS2 `mingw32`) and the launcher
-needs Go:
+The DLLs need 32-bit MinGW GCC (TDM-GCC or MSYS2 `mingw32` on Windows,
+`i686-w64-mingw32-gcc` on Linux) and the launcher needs Go.
+
+On Windows:
 
 ```powershell
 git clone https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch.git
@@ -123,17 +162,32 @@ go test ./...
 go build -ldflags="-H=windowsgui" -o "Secret Agent Barbie Launcher.exe" .
 ```
 
+On Linux (Debian/Ubuntu packages shown), the DLLs are cross-compiled and the
+probes run under Wine; set `WINE=/path/to/wine` to use another Wine build:
+
+```sh
+sudo apt install gcc-mingw-w64-i686 make wine wine32:i386
+cd shim-dll
+make clean all test
+cd ../launcher
+go test ./...
+CGO_ENABLED=0 go build -o secret-agent-barbie-launcher .
+```
+
+The same Makefile also cross-compiles the Windows launcher with
+`GOOS=windows go build -ldflags="-H=windowsgui" -o "Secret Agent Barbie Launcher.exe" .`
+
 The default build enables `SHIM_DEBUG`, so release DLLs write their logs. The
 widescreen probe in `mingw32-make test` runs only when
-`game-files/SecretAgent.exe` exists. CI builds and tests both parts on every
-push. Passing tests does not establish in-game behavior.
+`game-files/SecretAgent.exe` exists. CI builds and tests both parts on Windows
+and Linux on every push. Passing tests does not establish in-game behavior.
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
 | [`shim-dll/`](shim-dll) | `ddraw.dll` and `dinput.dll` sources, headers, export definitions and regression probes |
-| [`launcher/`](launcher) | Go/WebView2 settings launcher and save backups |
+| [`launcher/`](launcher) | Go settings launcher (WebView2 on Windows, browser window and Wine on Linux) and save backups |
 | [`config/`](config) | Release `dgVoodoo.conf` |
 | [`tools/`](tools) | Main-menu HD_UI tile reconstruction scripts |
 | [`TECHNICAL.md`](TECHNICAL.md) | Shim internals and how to reuse the approach for other games |
@@ -153,8 +207,8 @@ push. Passing tests does not establish in-game behavior.
 ## Contributing
 
 When [reporting a bug](https://github.com/NoRain211/Barbie-Secret-Agent-Win-11-Patch/issues), include the patch version, steps to
-reproduce, what happened, your Windows version, GPU and controller, and both log
-files. Never upload game files, saves or extracted assets.
+reproduce, what happened, your Windows version (or Linux distribution and Wine
+version), GPU and controller, and both log files (plus `wine.log` on Linux). Never upload game files, saves or extracted assets.
 
 ## AI assistance
 
