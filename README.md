@@ -57,6 +57,7 @@ No administrator rights, registry changes or installer are needed.
 | Xbox controllers through SDL3 | Detected and read in probes; full play session pending |
 | PlayStation, Switch and generic controllers | Supported by SDL3; not yet confirmed on hardware |
 | Ultrawide, outfit and camera/hook screens | Patch checks pass; full playthrough pending |
+| Linux through Wine | Shim probes pass under Wine and the launcher starts the game through Wine; in-game play not yet confirmed |
 
 ## Play
 
@@ -174,7 +175,7 @@ go test ./...
 CGO_ENABLED=0 go build -o secret-agent-barbie-launcher .
 ```
 
-The same Makefile also cross-compiles the Windows launcher with
+Go can also build the Windows launcher from Linux with
 `GOOS=windows go build -ldflags="-H=windowsgui" -o "Secret Agent Barbie Launcher.exe" .`
 
 The default build enables `SHIM_DEBUG`, so release DLLs write their logs. The

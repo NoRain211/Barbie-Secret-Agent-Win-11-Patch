@@ -1,6 +1,7 @@
 # Secret Agent Barbie Launcher
 
-A GUI launcher for Secret Agent Barbie (2001) with Windows 11 compatibility settings.
+A GUI launcher for Secret Agent Barbie (2001) with compatibility settings, for
+Windows 10/11 and Linux (through Wine).
 
 ## Features
 
@@ -13,25 +14,35 @@ A GUI launcher for Secret Agent Barbie (2001) with Windows 11 compatibility sett
 ## Building
 
 ### Prerequisites
-- Go 1.21 or later
-- Microsoft Edge WebView2 Runtime (included with Windows 11)
+- Go 1.25 or later
+- Windows: Microsoft Edge WebView2 Runtime (included with Windows 11)
+- Linux: Wine to run the game; a Chromium-based browser is optional
 
 ### Build Commands
 
 ```bash
 go test ./...
+# Windows
 go build -ldflags="-H=windowsgui" -o "Secret Agent Barbie Launcher.exe" .
+# Linux (static, no cgo)
+CGO_ENABLED=0 go build -o secret-agent-barbie-launcher .
 ```
+
+Platform code lives in `platform_windows.go` (WebView2 window, monitors through
+`user32`, direct launch) and `platform_unix.go` (browser window, monitors through
+`xrandr`, launch through Wine with the patch's DLL overrides).
 
 ## Installation
 
 1. Build the launcher
-2. Place `Secret Agent Barbie Launcher.exe` beside `SecretAgent.exe` and `dgVoodoo.conf` in the writable game folder
+2. Place `Secret Agent Barbie Launcher.exe` (Windows) or
+   `secret-agent-barbie-launcher` (Linux) beside `SecretAgent.exe` and `dgVoodoo.conf` in the writable game folder
 3. Double-click to run
 
 The launcher reads and writes the adjacent `dgVoodoo.conf` and
 `SecretAgentBarbieWidescreenFix.ini`, then starts the adjacent
-`SecretAgent.exe`. Configuration or launch failures remain visible in the
+`SecretAgent.exe` (through Wine on Linux; see the main README for the Wine
+environment variables). Configuration or launch failures remain visible in the
 launcher instead of closing the window.
 
 ## Gamepad Support
